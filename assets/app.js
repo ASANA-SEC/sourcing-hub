@@ -1611,9 +1611,17 @@
 
   // ---- email text
 
-  /** What the RFQ task asks for, without the internal DUE line at the top of the notes. */
+  const ASANA_FILES_RE = /^\s*Attachments in Asana \(not copied\):\s*(.*)$/i;
+
+  /** What the RFQ task asks for, without the internal DUE line and the note about files left in Asana. */
   function rfqItemsText(r) {
-    return String(r.items || '').split(/\r?\n/).filter((l) => !/^\s*DUE\s*:/i.test(l)).join('\n').trim();
+    return String(r.items || '').split(/\r?\n/).filter((l) => !/^\s*DUE\s*:/i.test(l) && !ASANA_FILES_RE.test(l)).join('\n').trim();
+  }
+
+  /** Files the Asana migration did not copy; the notes only name them. */
+  function asanaOnlyFiles(r) {
+    const line = String(r.items || '').split(/\r?\n/).map((l) => ASANA_FILES_RE.exec(l)).find(Boolean);
+    return line ? line[1].split(', ').filter(Boolean) : [];
   }
 
   /** "5 Nov 2026 at 11:00 PM", read straight from the stored Malaysia-time text. */
@@ -1664,7 +1672,8 @@
     if (srcState.hub.error) return `<div class="empty-state"><b>Could not read RFQ Hub</b>${esc(srcState.hub.error)}<div style="margin-top:10px"><button class="btn" data-act="src-hub-load">Try again</button></div></div>`;
     const secs = hubSections();
     if (!secs.length) return '<div class="empty-state"><b>No RFQ sections you can open in RFQ Hub</b></div>';
-    const s = secs.find((x) => x.id === srcState.sectionId) || secs[0];
+    // Newest section with a real Pending column first; the migrated monthly RFQ sections come last in the list.
+    const s = secs.find((x) => x.id === srcState.sectionId) || secs.filter(hubHasPending).pop() || secs[0];
     const stage = hubPickStage(s);
     const list = srcState.hub.items.filter((it) => it.sectionId === s.id && (it.data || {})[s.stageField] === stage).map((it) => hubTask(s, it))
       .sort((x, y) => (x.closing || '9999').localeCompare(y.closing || '9999'));
@@ -1731,13 +1740,15 @@
     const d = srcDraft(id);
     const past = r.closing && hoursUntil(r.closing) < 0;
     const items = rfqItemsText(r);
+    const asanaOnly = asanaOnlyFiles(r);
     const reg = a.edit ? registerSuppliers() : [];
     return `
       <div class="head"><div><a href="#sourcing">‹ RFQ Sourcing</a><h1>${esc(r.title)}</h1>
         <div class="sub">${esc(r.hubSectionName || 'RFQ Hub')} · ${esc(r.rfqNo || 'No RFQ no.')} · Closing ${esc(fmtDT(r.closing))} ${past ? '<span class="chip crit">Closing date has passed</span>' : ''}</div></div>
         <div class="toolbar">${srcStatusChip(r)}${a.edit ? `<button class="btn" data-act="src-refresh" data-id="${esc(id)}">Refresh from RFQ Hub</button>` : ''}</div></div>
       <div class="group"><h2>Items to quote</h2><pre class="src-pre">${items ? esc(items) : '<span class="muted">The Notes of this task are empty.</span>'}</pre></div>
-      <div class="group"><h2>Attachments</h2>${(r.files || []).length ? `<ul class="src-files">${r.files.map((f) => `<li>${esc(f.name)}</li>`).join('')}</ul>` : '<p class="muted">None on this task.</p>'}</div>
+      <div class="group"><h2>Attachments</h2>${(r.files || []).length ? `<ul class="src-files">${r.files.map((f) => `<li>${esc(f.name)}</li>`).join('')}</ul>` : (asanaOnly.length ? '' : '<p class="muted">None on this task.</p>')}
+        ${asanaOnly.length ? `<div class="banner"><b>Only in Asana</b><span>Add these to the RFQ Hub task before sending, then refresh: ${esc(asanaOnly.join(', '))}</span></div>` : ''}</div>
       <form id="srcForm" data-id="${esc(id)}" novalidate>
         <div class="group"><h2>Email details</h2><div class="src-fields">
           <label class="fld"><span>Email title</span><input name="emailSubject" value="${esc(d.emailSubject)}"${a.edit ? '' : ' disabled'}></label>

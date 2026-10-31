@@ -125,7 +125,7 @@
       sections: [section],
       items: [
         task('hub_101', 'Supply of UV lamps and ballasts for example plant', 'pending', 7, 'DUE: example client deadline\n\n1. LAMP, UV, EXAMPLE MODEL\nPOWER RATING: 39 W\nQTY: 4 PC\n\n2. BALLAST, ELECTRONIC, EXAMPLE MODEL\nVOLTAGE RATING: 220-240 VAC\nQTY: 2 EA', [{ id: 'f1', name: 'example-specification.pdf', mimeType: 'application/pdf', size: 1024 }]),
-        task('hub_102', 'Supply of instrument tubing and fittings', 'pending', 3, '1. TUBING, EXAMPLE 316SS\nQTY: 100 M'),
+        task('hub_102', 'Supply of instrument tubing and fittings', 'pending', 3, '1. TUBING, EXAMPLE 316SS\nQTY: 100 M\n\nAttachments in Asana (not copied): example-drawing.pdf, example-datasheet.pdf'),
         task('hub_103', 'Supply of cable glands', 'todo', 9, '1. CABLE GLAND, EXAMPLE\nQTY: 20 EA'),
       ],
     };
