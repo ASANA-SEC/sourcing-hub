@@ -1651,9 +1651,11 @@
   // ---- screens
 
   function srcDraft(id) {
-    if (!srcState.drafts[id]) {
-      const r = srcRec(id) || {};
-      srcState.drafts[id] = { suppliers: (r.suppliers || []).map((x) => ({ ...x })), emailSubject: r.emailSubject || '', deliveryLocation: r.deliveryLocation || '' };
+    const r = srcRec(id) || {};
+    const held = srcState.drafts[id];
+    // Unedited drafts follow what is saved, so changes made elsewhere show after a refresh.
+    if (!held || (!held.edited && held.at !== r.updatedAt)) {
+      srcState.drafts[id] = { at: r.updatedAt, edited: false, suppliers: (r.suppliers || []).map((x) => ({ ...x })), emailSubject: r.emailSubject || '', deliveryLocation: r.deliveryLocation || '' };
     }
     return srcState.drafts[id];
   }
@@ -1776,6 +1778,7 @@
     const form = $('#srcForm');
     if (!form) return null;
     const d = srcDraft(form.dataset.id);
+    d.edited = true;
     d.emailSubject = form.elements.emailSubject.value;
     d.deliveryLocation = form.elements.deliveryLocation.value;
     d.suppliers = [...form.querySelectorAll('tr[data-sup]')].map((tr) => {
