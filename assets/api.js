@@ -112,7 +112,7 @@
       sup(4, 'Supplier F Trading (example)', 'valves', 'Mr Lim', 'lim@supplier-f.example.com', 'Supplier', 'Malaysia', 'blacklisted', 'c', 'Late deliveries 2025', null),
     ];
     return { users, sections, access, items, comments: [], sourcing: [], emails: [],
-      settings: [{ id: 'email', fromEmail: DEMO_FROM, cc: 'colleague.one@example.com; colleague.two@example.com', signature: 'Example Buyer\n\nEXAMPLE COMPANY SDN BHD\nKuala Lumpur, Malaysia', updatedBy: SAM, updatedAt: stamp(-1) }] };
+      settings: [{ id: 'email', fromEmail: DEMO_FROM, cc: 'colleague.one@example.com; colleague.two@example.com', signature: 'Example Buyer\n\nEXAMPLE COMPANY SDN BHD\nKuala Lumpur, Malaysia', updatedBy: SAM, updatedAt: stamp(-1), notifyEmail: SAM, followUpOn: false }] };
   }
 
   /** What RFQ Hub would answer in demo mode: one RFQ section with a Pending column. */
@@ -132,6 +132,9 @@
       ],
     };
   }
+
+  function demoJson(key) { try { return JSON.parse(localStorage.getItem(key) || '{}'); } catch (e) { return {}; } }
+  function demoLog(key, row) { let list = []; try { list = JSON.parse(localStorage.getItem(key) || '[]'); } catch (e) { list = []; } list.push(row); localStorage.setItem(key, JSON.stringify(list)); }
 
   function demoStore() {
     let db = null;
@@ -159,6 +162,13 @@
       del: (t, id) => { db[t] = load()[t].filter((r) => r.id !== id); persist(); },
       delWhere: (t, fn) => { db[t] = load()[t].filter((r) => !fn(r)); persist(); },
       now: () => new Date().toISOString(),
+      kl: (iso) => {
+        const fake = !iso && demoJson('sourcinghub_demo_kl');
+        if (fake && fake.date) return fake;
+        const d = new Date(iso || Date.now());
+        const shifted = new Date(d.getTime() + 8 * 36e5);
+        return { date: shifted.toISOString().slice(0, 10), hour: shifted.getUTCHours() };
+      },
       uid: () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
       saveFile: (item, name) => { if (item.sectionId === 'sourcing') return { id: 'demo_' + name, name, mimeType: 'application/pdf', size: 1 }; throw noDrive(); },
       readFile: () => { throw noDrive(); },
@@ -168,8 +178,11 @@
         status() { return { account: DEMO_FROM, remaining: this.quota }; },
         createDraft: () => ({ draftId: 'demo_draft', messageId: 'demo_msg' }),
         deleteDraft: () => {},
-        sendDraft(id) { if (localStorage.getItem('sourcinghub_demo_fail')) throw new Error('Service invoked too many times for one day: email.'); this.quota -= 3; return { messageId: 'demo_' + Date.now(), threadId: 'demo_thread' }; },
+        sendDraft(id) { if (localStorage.getItem('sourcinghub_demo_fail')) throw new Error('Service invoked too many times for one day: email.'); this.quota -= 3; return { messageId: 'demo_' + Date.now(), threadId: 'demo_thread_' + id + '_' + Math.random().toString(36).slice(2, 8) }; },
         sendTest() { this.quota -= 1; },
+        threadMessages(threadId) { return demoJson('sourcinghub_demo_replies')[threadId] || []; },
+        replyAll(threadId, body) { demoLog('sourcinghub_demo_outbox', { threadId, body }); this.quota -= 2; },
+        notify(to, subject) { demoLog('sourcinghub_demo_alerts', { to, subject }); this.quota -= 1; },
       },
       reset: () => { try { localStorage.removeItem(DEMO_KEY); } catch (e) { /* blocked */ } db = null; },
     };

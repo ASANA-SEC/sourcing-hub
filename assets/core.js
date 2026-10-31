@@ -470,9 +470,16 @@ var Core = (function () {
         var from = String(p.fromEmail || '').trim().toLowerCase();
         if (!EMAIL_RE.test(from)) throw fail('BAD_REQUEST', 'Enter the Gmail address that sends the RFQ emails.');
         var hadSet = store.all('settings').filter(function (x) { return x.id === 'email'; })[0];
-        var setRec = { id: 'email', fromEmail: from, cc: cc.join('; '), signature: String(p.signature || '').trim().slice(0, 2000), updatedBy: me.id, updatedAt: now };
+        var notify = String(p.notifyEmail || '').trim().toLowerCase();
+        if (notify && !EMAIL_RE.test(notify)) throw fail('BAD_REQUEST', 'Check the address for supplier reply alerts.');
+        var setRec = { id: 'email', fromEmail: from, cc: cc.join('; '), signature: String(p.signature || '').trim().slice(0, 2000), updatedBy: me.id, updatedAt: now, notifyEmail: notify, followUpOn: p.followUpOn === true };
         if (hadSet) store.save('settings', setRec); else store.insert('settings', setRec);
         return { settings: setRec };
+      }
+
+      case 'monitor.run': {
+        if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can check replies.');
+        return { result: runMonitor(store), emails: store.all('emails') };
       }
 
       case 'mail.status': {
@@ -776,8 +783,126 @@ var Core = (function () {
     }
   }
 
+  // ------------------------------------------------------------ watching RFQ replies
+
+  var QUOTE_FILE_RE = /\.(pdf|xlsx?|docx?|csv|zip)$/i;
+  var MIN_QUOTA_TO_CHASE = 10;
+  var MONITOR_BUDGET_MS = 4 * 60 * 1000;
+  var GMAIL_BASE = 'https://mail.google.com/mail/u/?authuser=';
+
+  /** bounced, auto, quote (a reply with a document) or query (any other reply). A person decides what it really is. */
+  function classifyReply(m) {
+    var from = String(m.from || '').toLowerCase();
+    if (/mailer-daemon|postmaster/.test(from)) return 'bounced';
+    if (m.isAuto || /^(out of office|automatic reply|auto[- ]?reply|autoreply)/i.test(String(m.subject || '').trim())) return 'auto';
+    if ((m.attachments || []).some(function (n) { return QUOTE_FILE_RE.test(n); })) return 'quote';
+    return 'query';
+  }
+  function closingTime(closing) {
+    if (!closing) return 0;
+    return Date.parse(closing.length > 10 ? closing + ':00+08:00' : closing + 'T23:59:00+08:00');
+  }
+  function followUpBody(r, settings, final) {
+    return ['Dear Sir / Madam,', '',
+      final ? 'This is a final reminder on our request for quotation below. We have not yet received your quotation.' : 'We refer to our request for quotation below. We have not yet received your quotation.', '',
+      'Kindly submit your quotation no later than ' + closingForEmail(r.closing) + ' (Malaysia time[UTC +8]). If you are unable to quote, please let us know.', '',
+      'Warmest Regards,', '', settings.signature].join('\n');
+  }
+
+  /** One pass: read every sent thread, tell Sam about new replies, then send any follow-up that is due. */
+  function runMonitor(store) {
+    var settings = store.all('settings').filter(function (x) { return x.id === 'email'; })[0];
+    var result = { checked: 0, replies: 0, followUps: 0, skipped: 0, errors: [] };
+    if (!settings) return result;
+    var startedAt = Date.now();
+    var account = String(store.mail.status().account || '').toLowerCase();
+    var ours = String(settings.cc || '').split('; ').concat([account]).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+    var tasks = {};
+    store.all('sourcing').forEach(function (r) { tasks[r.id] = r; });
+    var kl = store.kl();
+    var nowIso = store.now();
+    var notifyTo = settings.notifyEmail;
+    function tell(subject, body) {
+      if (!notifyTo) return;
+      try { store.mail.notify(notifyTo, subject, body); } catch (e) { result.errors.push('notify: ' + (e.message || e)); }
+    }
+    var gmailLink = function (threadId) { return GMAIL_BASE + encodeURIComponent(account) + '#all/' + threadId; };
+    var sent = store.all('emails').filter(function (e) { return e.status === 'sent' && e.threadId && tasks[e.taskId]; })
+      .sort(function (a, b) { return String(a.checkedAt || '').localeCompare(String(b.checkedAt || '')); });
+
+    sent.forEach(function (e) {
+      if (Date.now() - startedAt > MONITOR_BUDGET_MS) { result.skipped++; return; }
+      var r = tasks[e.taskId];
+      try {
+        var lastSeen = Number(e.lastMsgAt) || Date.parse(e.sentAt) || 0;
+        var fresh = store.mail.threadMessages(e.threadId).filter(function (m) {
+          if (Number(m.time) <= lastSeen) return false;
+          var from = String(m.from || '').toLowerCase();
+          return !ours.some(function (o) { return from.indexOf(o) >= 0; });
+        });
+        fresh.forEach(function (m) {
+          var kind = classifyReply(m);
+          lastSeen = Math.max(lastSeen, Number(m.time));
+          if (kind === 'auto') {
+            if (!e.replyStatus) e.replyStatus = 'auto';
+            return;
+          }
+          if (e.replyStatus !== 'quote' || kind === 'quote') e.replyStatus = kind;
+          e.replyAt = new Date(Number(m.time)).toISOString();
+          e.replyFrom = String(m.from || '').slice(0, 200);
+          e.replySnippet = String(m.snippet || '').slice(0, 500);
+          result.replies++;
+          var label = kind === 'bounced' ? 'EMAIL BOUNCED' : (kind === 'quote' ? 'Possible quotation' : 'Supplier reply: decision needed');
+          tell('[RFQ] ' + label + ': ' + (e.company || e.email) + ' / ' + (r.rfqNo || r.title),
+            label + '\n\nRFQ: ' + r.title + '\nSupplier: ' + (e.company || '') + ' <' + e.email + '>\nFrom: ' + e.replyFrom + '\nFiles: ' + ((m.attachments || []).join(', ') || 'none') + '\n\n' + e.replySnippet + '\n\nOpen in Gmail (' + account + '): ' + gmailLink(e.threadId) + '\n\nNothing has been replied. Reply only after your decision.');
+        });
+        e.lastMsgAt = String(lastSeen);
+        e.checkedAt = nowIso;
+        e.updatedAt = nowIso;
+        store.save('emails', e);
+        result.checked++;
+      } catch (err) {
+        result.errors.push(e.email + ': ' + (err.message || err));
+      }
+    });
+
+    if (!settings.followUpOn) return result;
+    var isMorning = kl.hour === 9;
+    var isFinalHour = kl.hour === 13;
+    if (!isMorning && !isFinalHour) return result;
+    var quotaWarned = false;
+    store.all('emails').forEach(function (e) {
+      var r = tasks[e.taskId];
+      if (e.status !== 'sent' || !r || !e.threadId) return;
+      if (e.replyStatus && e.replyStatus !== 'auto') return;
+      if (closingTime(r.closing) <= Date.now()) return;
+      if (store.kl(e.sentAt).date === kl.date) return;
+      var closingToday = String(r.closing).slice(0, 10) === kl.date;
+      var final = isFinalHour && closingToday && e.finalSentOn !== kl.date;
+      var regular = isMorning && e.lastFollowUpOn !== kl.date;
+      if (!final && !regular) return;
+      if (Date.now() - startedAt > MONITOR_BUDGET_MS) { result.skipped++; return; }
+      if (store.mail.status().remaining < MIN_QUOTA_TO_CHASE) {
+        if (!quotaWarned) tell('[RFQ] Follow-ups stopped: Gmail daily limit nearly used', 'Follow-ups for today stopped because few recipients are left. They will continue tomorrow.');
+        quotaWarned = true;
+        return;
+      }
+      try {
+        store.mail.replyAll(e.threadId, followUpBody(r, settings, final));
+        if (final) e.finalSentOn = kl.date; else e.lastFollowUpOn = kl.date;
+        e.followUps = (Number(e.followUps) || 0) + 1;
+        e.updatedAt = store.now();
+        store.save('emails', e);
+        result.followUps++;
+      } catch (err) {
+        result.errors.push(e.email + ': ' + (err.message || err));
+      }
+    });
+    return result;
+  }
+
   return {
     SUPER_ADMINS: SUPER_ADMINS, isSuperId: isSuperId, LEVELS: LEVELS, FIELD_TYPES: FIELD_TYPES, COLORS: COLORS,
-    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, rfqItemsText: rfqItemsText, asanaOnlyFiles: asanaOnlyFiles, rfqEmailBody: rfqEmailBody, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
+    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, rfqItemsText: rfqItemsText, asanaOnlyFiles: asanaOnlyFiles, rfqEmailBody: rfqEmailBody, followUpBody: followUpBody, classifyReply: classifyReply, runMonitor: runMonitor, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
   };
 })();

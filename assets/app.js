@@ -1813,6 +1813,27 @@
     || e.cc !== (S.settings || {}).cc || e.body !== Core.rfqEmailBody(r, S.settings);
   const gmailUrl = (hash) => `https://mail.google.com/mail/u/?authuser=${encodeURIComponent((S.settings || {}).fromEmail || '')}#${hash}`;
 
+  function replyChip(e) {
+    if (e.status !== 'sent') return '';
+    const n = Number(e.followUps) || 0;
+    const chased = n ? ` · ${n} follow-up${n > 1 ? 's' : ''}` : '';
+    if (e.replyStatus === 'quote') return `<span class="chip ok">Possible quotation</span>${chased}`;
+    if (e.replyStatus === 'query') return `<span class="chip warn">Reply: decide</span>${chased}`;
+    if (e.replyStatus === 'bounced') return '<span class="chip crit">Bounced</span>';
+    return `<span class="muted">${e.replyStatus === 'auto' ? 'Auto-reply only' : 'No reply yet'}${chased}</span>`;
+  }
+
+  async function srcCheckReplies() {
+    try {
+      setBusy('Checking replies in Gmail…');
+      const res = await API.call('monitor.run');
+      S.emails = res.emails;
+      const r = res.result;
+      toast(`${r.checked} threads checked, ${r.replies} new replies${r.errors.length ? ', ' + r.errors.length + ' errors' : ''}`, !!r.errors.length);
+    } catch (e) { handleError(e); }
+    setBusy('');
+  }
+
   function mailChip(e, stale) {
     if (e.status === 'sent') return `<span class="chip ok">Sent ${esc(fmtDT(e.sentAt))}</span>`;
     if (e.status === 'failed') return `<span class="chip crit" title="${esc(e.error)}">Failed</span>`;
@@ -1847,7 +1868,7 @@
     if (!r.deliveryLocation) missing.push('enter the delivery location');
     const busy = srcState.mailBusy;
     const canDraft = a.approve && !missing.length && !busy && (!asana.length || srcState.skipAsana === r.id);
-    const rows = mails.map((e) => `<tr><td class="title">${esc(e.company || '—')}</td><td class="nw">${esc(e.email)}</td><td class="nw">${mailChip(e, mailStale(r, e))}</td>
+    const rows = mails.map((e) => `<tr><td class="title">${esc(e.company || '—')}</td><td class="nw">${esc(e.email)}</td><td class="nw">${mailChip(e, mailStale(r, e))}</td><td class="nw" title="${esc(e.replySnippet || '')}">${replyChip(e)}</td>
       <td class="nw">${e.status === 'sent' ? `<a href="${esc(gmailUrl('all/' + e.threadId))}" target="_blank" rel="noopener">Open email</a>` : `<a href="${esc(gmailUrl('drafts?compose=' + e.messageId))}" target="_blank" rel="noopener">Open draft</a>`}</td></tr>`).join('');
     return `<div class="group"><h2>RFQ emails</h2>
       <p class="muted">From ${esc(set.fromEmail)} · CC ${esc(set.cc || 'none')}</p>
@@ -1855,10 +1876,11 @@
         <label class="fld chk src-skip"><input type="checkbox" id="srcSkipAsana" ${srcState.skipAsana === r.id ? 'checked' : ''}><span>Create the drafts without these files</span></label>` : ''}
       ${missing.length ? `<p class="muted">Before making drafts: ${esc(missing.join(', '))}.</p>` : ''}
       ${busy ? `<p class="src-warn">${esc(busy)}</p>` : ''}
-      ${mails.length ? `<div class="tablewrap"><table class="t"><thead><tr><th>Company</th><th>To</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
+      ${mails.length ? `<div class="tablewrap"><table class="t"><thead><tr><th>Company</th><th>To</th><th>Status</th><th>Reply</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
       ${anyStale ? '<p class="src-warn">The task, list or settings changed. Create the drafts again before sending.</p>' : ''}
       ${mails.some((e) => e.status === 'failed') ? `<p class="src-warn">${esc(mails.find((e) => e.status === 'failed').error)}</p>` : ''}
       ${a.approve ? `<div class="form-actions src-actions">
+        ${mails.some((e) => e.status === 'sent') ? `<button type="button" class="btn" data-act="src-check" ${busy ? 'disabled' : ''}>Check replies now</button>` : ''}
         <button type="button" class="btn" data-act="src-test" data-id="${esc(r.id)}" ${busy || unsaved || !r.emailSubject || !r.deliveryLocation ? 'disabled' : ''}>Send test to me</button>
         <button type="button" class="btn" data-act="src-prepare" data-id="${esc(r.id)}" ${canDraft ? '' : 'disabled'}>${unsentList.length ? 'Create drafts again' : 'Create drafts'}</button>
         <span class="sp"></span>
@@ -1956,6 +1978,9 @@
         <label class="fld"><span>Send from (must match the account the backend runs on)</span><input name="fromEmail" type="email" value="${esc(set.fromEmail || '')}"></label>
         <label class="fld"><span>CC on every RFQ email</span><textarea name="cc" rows="3">${esc(set.cc || '')}</textarea></label>
         <label class="fld"><span>Signature (printed under “Warmest Regards,”)</span><textarea name="signature" rows="9">${esc(set.signature || '')}</textarea></label>
+        <label class="fld"><span>Send supplier reply alerts to</span><input name="notifyEmail" type="email" value="${esc(set.notifyEmail || '')}"></label>
+        <label class="fld chk"><input type="checkbox" name="followUpOn" ${set.followUpOn ? 'checked' : ''}><span>Send follow-ups automatically: 9am daily, plus a final reminder at 1pm on the closing day, only to suppliers with no reply</span></label>
+        <details><summary>Follow-up wording</summary><pre class="src-pre">${esc(Core.followUpBody({ closing: '2026-11-05T23:00' }, { signature: set.signature || '[signature]' }, false))}</pre><pre class="src-pre">${esc(Core.followUpBody({ closing: '2026-11-05T23:00' }, { signature: set.signature || '[signature]' }, true))}</pre></details>
         <div class="form-actions"><button type="submit" class="btn primary">Save</button></div>
       </form>
       <p class="muted">${st ? (st.error ? esc(st.error) : `This platform sends as ${esc(st.account)}. Google allows ${esc(String(st.remaining))} more recipients today.`) : 'Checking the Gmail connection…'}</p>`;
@@ -1963,7 +1988,7 @@
 
   async function saveMailSettings(form) {
     try {
-      const res = await API.call('settings.save', { fromEmail: form.elements.fromEmail.value, cc: form.elements.cc.value, signature: form.elements.signature.value });
+      const res = await API.call('settings.save', { fromEmail: form.elements.fromEmail.value, cc: form.elements.cc.value, signature: form.elements.signature.value, notifyEmail: form.elements.notifyEmail.value, followUpOn: form.elements.followUpOn.checked });
       S.settings = res.settings;
       toast('Email settings saved');
       render();
@@ -2829,6 +2854,7 @@
       case 'src-prepare': srcPrepare(d.id); break;
       case 'src-send': srcSend(d.id); break;
       case 'src-test': srcTest(d.id); break;
+      case 'src-check': srcCheckReplies(); break;
       case 'src-import': srcImport(d.id, d.section); break;
       case 'src-refresh': srcRefresh(d.id); break;
       case 'src-remove': srcRemove(d.id); break;

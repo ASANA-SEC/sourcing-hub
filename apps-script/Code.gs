@@ -35,11 +35,11 @@ const TABLES = {
   comments: ['id', 'sectionId', 'itemId', 'kind', 'author', 'text', 'createdAt', 'updatedAt'],
   calendar: ['id', 'eventId', 'updatedAt'], // id = item id
   sourcing: ['id', 'hubSectionId', 'hubSectionName', 'title', 'rfqNo', 'client', 'closing', 'items', 'files', 'hubUpdatedAt', 'status', 'suppliers', 'emailSubject', 'deliveryLocation', 'approvedBy', 'approvedAt', 'createdBy', 'createdAt', 'updatedAt', 'mailFiles'], // id = RFQ Hub item id
-  emails: ['id', 'taskId', 'email', 'company', 'cc', 'subject', 'body', 'draftId', 'messageId', 'threadId', 'status', 'error', 'listApprovedAt', 'createdBy', 'createdAt', 'sentBy', 'sentAt', 'updatedAt'],
-  settings: ['id', 'fromEmail', 'cc', 'signature', 'updatedBy', 'updatedAt'], // private to this Sheet: the repository is public
+  emails: ['id', 'taskId', 'email', 'company', 'cc', 'subject', 'body', 'draftId', 'messageId', 'threadId', 'status', 'error', 'listApprovedAt', 'createdBy', 'createdAt', 'sentBy', 'sentAt', 'updatedAt', 'replyStatus', 'replyAt', 'replyFrom', 'replySnippet', 'lastMsgAt', 'checkedAt', 'followUps', 'lastFollowUpOn', 'finalSentOn'],
+  settings: ['id', 'fromEmail', 'cc', 'signature', 'updatedBy', 'updatedAt', 'notifyEmail', 'followUpOn'], // private to this Sheet: the repository is public
 };
 const JSON_COLS = ['fields', 'data', 'editors', 'collaborators', 'files', 'suppliers', 'mailFiles'];
-const BOOL_COLS = ['active', 'archived'];
+const BOOL_COLS = ['active', 'archived', 'followUpOn'];
 const NUM_COLS = ['order'];
 const READ_ONLY_ACTIONS = ['bootstrap', 'item.file', 'mail.status'];
 
@@ -95,6 +95,9 @@ function setup() {
   Logger.log('Calendar: Sourcing Hub (' + calId + ')');
   Logger.log('Super admins: ' + Core.SUPER_ADMINS.join(', '));
   // Touching Gmail here makes Google ask for the mail permission while someone is at the keyboard.
+  // Replies are read every 10 minutes; follow-ups go out in the 9am and 1pm passes when switched on in Email settings.
+  const ticking = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'monitorTick'; });
+  if (!ticking) ScriptApp.newTrigger('monitorTick').timeBased().everyMinutes(10).create();
   Logger.log('Sends as: ' + Session.getEffectiveUser().getEmail() + ' (' + GmailApp.getDrafts().length + ' drafts, ' + MailApp.getRemainingDailyQuota() + ' recipients left today)');
 }
 
@@ -102,6 +105,12 @@ function setup() {
 function syncAllCalendar() {
   const r = resyncCalendar_(sheetStore_(), null, 5 * 60 * 1000);
   Logger.log('Synced ' + r.synced + ' items, ' + r.remaining + ' left. Run again if anything is left.');
+}
+
+/** Runs by itself every 10 minutes (the trigger is created by setup). */
+function monitorTick() {
+  const r = withLock_(function () { return Core.runMonitor(sheetStore_()); });
+  Logger.log(JSON.stringify(r));
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -347,6 +356,25 @@ function sheetStore_() {
         return { messageId: msg.getId(), threadId: msg.getThread().getId() };
       },
       sendTest: function (m) { GmailApp.sendEmail(m.to, m.subject, m.body, mailOptions_(m)); },
+      threadMessages: function (threadId) {
+        return GmailApp.getThreadById(threadId).getMessages().map(function (m) {
+          let auto = '';
+          try { auto = m.getHeader('Auto-Submitted'); } catch (e) { auto = ''; }
+          return {
+            time: m.getDate().getTime(), from: m.getFrom(), subject: m.getSubject(), snippet: m.getPlainBody().slice(0, 500),
+            attachments: m.getAttachments().map(function (a) { return a.getName(); }), isAuto: !!auto && auto.toLowerCase() !== 'no',
+          };
+        });
+      },
+      replyAll: function (threadId, body) {
+        const msgs = GmailApp.getThreadById(threadId).getMessages();
+        msgs[msgs.length - 1].replyAll(body, mailOptions_({ body: body }));
+      },
+      notify: function (to, subject, body) { GmailApp.sendEmail(to, subject, body); },
+    },
+    kl: function (iso) {
+      const d = iso ? new Date(iso) : new Date();
+      return { date: Utilities.formatDate(d, 'Asia/Kuala_Lumpur', 'yyyy-MM-dd'), hour: Number(Utilities.formatDate(d, 'Asia/Kuala_Lumpur', 'H')) };
     },
     now: function () { return new Date().toISOString(); },
     uid: function () { return Utilities.getUuid().replace(/-/g, '').slice(0, 16); },
