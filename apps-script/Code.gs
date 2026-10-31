@@ -34,12 +34,14 @@ const TABLES = {
   items: ['id', 'sectionId', 'title', 'data', 'editors', 'collaborators', 'files', 'stageChangedAt', 'createdBy', 'createdAt', 'updatedAt'],
   comments: ['id', 'sectionId', 'itemId', 'kind', 'author', 'text', 'createdAt', 'updatedAt'],
   calendar: ['id', 'eventId', 'updatedAt'], // id = item id
-  sourcing: ['id', 'hubSectionId', 'hubSectionName', 'title', 'rfqNo', 'client', 'closing', 'items', 'files', 'hubUpdatedAt', 'status', 'suppliers', 'emailSubject', 'deliveryLocation', 'approvedBy', 'approvedAt', 'createdBy', 'createdAt', 'updatedAt'], // id = RFQ Hub item id
+  sourcing: ['id', 'hubSectionId', 'hubSectionName', 'title', 'rfqNo', 'client', 'closing', 'items', 'files', 'hubUpdatedAt', 'status', 'suppliers', 'emailSubject', 'deliveryLocation', 'approvedBy', 'approvedAt', 'createdBy', 'createdAt', 'updatedAt', 'mailFiles'], // id = RFQ Hub item id
+  emails: ['id', 'taskId', 'email', 'company', 'cc', 'subject', 'body', 'draftId', 'messageId', 'threadId', 'status', 'error', 'listApprovedAt', 'createdBy', 'createdAt', 'sentBy', 'sentAt', 'updatedAt'],
+  settings: ['id', 'fromEmail', 'cc', 'signature', 'updatedBy', 'updatedAt'], // private to this Sheet: the repository is public
 };
-const JSON_COLS = ['fields', 'data', 'editors', 'collaborators', 'files', 'suppliers'];
+const JSON_COLS = ['fields', 'data', 'editors', 'collaborators', 'files', 'suppliers', 'mailFiles'];
 const BOOL_COLS = ['active', 'archived'];
 const NUM_COLS = ['order'];
-const READ_ONLY_ACTIONS = ['bootstrap', 'item.file'];
+const READ_ONLY_ACTIONS = ['bootstrap', 'item.file', 'mail.status'];
 
 // ---------------------------------------------------------------- setup
 
@@ -92,6 +94,8 @@ function setup() {
   Logger.log('Folder:   ' + DriveApp.getFolderById(props.getProperty('FOLDER_ID')).getUrl());
   Logger.log('Calendar: Sourcing Hub (' + calId + ')');
   Logger.log('Super admins: ' + Core.SUPER_ADMINS.join(', '));
+  // Touching Gmail here makes Google ask for the mail permission while someone is at the keyboard.
+  Logger.log('Sends as: ' + Session.getEffectiveUser().getEmail() + ' (' + GmailApp.getDrafts().length + ' drafts, ' + MailApp.getRemainingDailyQuota() + ' recipients left today)');
 }
 
 /** Run from the editor to rebuild every Google Calendar event (for example after changing many items). */
@@ -329,6 +333,21 @@ function sheetStore_() {
       }
       delete cache[t];
     },
+    mail: {
+      status: function () { return { account: Session.getEffectiveUser().getEmail(), remaining: MailApp.getRemainingDailyQuota() }; },
+      createDraft: function (m) {
+        const d = GmailApp.createDraft(m.to, m.subject, m.body, mailOptions_(m));
+        return { draftId: d.getId(), messageId: d.getMessage().getId() };
+      },
+      deleteDraft: function (id) {
+        try { GmailApp.getDraft(id).deleteDraft(); } catch (e) { /* already gone from Gmail */ }
+      },
+      sendDraft: function (id) {
+        const msg = GmailApp.getDraft(id).send();
+        return { messageId: msg.getId(), threadId: msg.getThread().getId() };
+      },
+      sendTest: function (m) { GmailApp.sendEmail(m.to, m.subject, m.body, mailOptions_(m)); },
+    },
     now: function () { return new Date().toISOString(); },
     uid: function () { return Utilities.getUuid().replace(/-/g, '').slice(0, 16); },
     saveFile: function (item, name, mime, base64, by) {
@@ -346,6 +365,15 @@ function sheetStore_() {
       return { name: file.getName(), mimeType: blob.getContentType(), base64: Utilities.base64Encode(blob.getBytes()) };
     },
   };
+}
+
+/** Plain text and an HTML copy with the same line breaks, so Gmail does not re-wrap item lists. */
+function mailOptions_(m) {
+  const html = String(m.body).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+  const options = { htmlBody: '<div style="font-family:Arial,sans-serif;font-size:14px">' + html + '</div>' };
+  if (m.cc) options.cc = m.cc.split('; ').join(',');
+  if (m.fileIds && m.fileIds.length) options.attachments = m.fileIds.map(function (id) { return DriveApp.getFileById(id).getBlob(); });
+  return options;
 }
 
 function sheet_(name) {

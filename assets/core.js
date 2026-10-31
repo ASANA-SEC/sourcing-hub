@@ -233,6 +233,49 @@ var Core = (function () {
     return out;
   }
 
+  // ---- RFQ email text (the same words in the preview and in the email itself)
+
+  var ASANA_FILES_RE = /^\s*Attachments in Asana \(not copied\):\s*(.*)$/i;
+
+  /** What the RFQ task asks for, without the internal DUE line and the note about files left in Asana. */
+  function rfqItemsText(items) {
+    return String(items || '').split(/\r?\n/).filter(function (l) { return !/^\s*DUE\s*:/i.test(l) && !ASANA_FILES_RE.test(l); }).join('\n').trim();
+  }
+  /** Files the Asana migration did not copy; the notes only name them. */
+  function asanaOnlyFiles(items) {
+    var found = [];
+    String(items || '').split(/\r?\n/).forEach(function (l) {
+      var m = ASANA_FILES_RE.exec(l);
+      if (m) found = m[1].split(', ').filter(Boolean);
+    });
+    return found;
+  }
+  /** "5 Nov 2026 at 11:00 PM", read straight from the stored Malaysia-time text. */
+  function closingForEmail(v) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/.exec(v || '');
+    if (!m) return '';
+    var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    var date = Number(m[3]) + ' ' + months[Number(m[2]) - 1] + ' ' + m[1];
+    if (!m[4]) return date;
+    var h = Number(m[4]);
+    return date + ' at ' + (h % 12 || 12) + ':' + m[5] + (h < 12 ? ' AM' : ' PM');
+  }
+  function rfqEmailBody(r, settings) {
+    var location = String(r.deliveryLocation || '');
+    var place = location ? (/malaysia/i.test(location) ? location : location + ', Malaysia') : '[delivery location]';
+    var signature = (settings && settings.signature) || '[signature]';
+    return ['Dear Sir / Madam,', '', 'We trust this email finds you well.', '', 'Kindly submit your formal quotation for the item specified Below:', '',
+      rfqItemsText(r.items), '',
+      'For completeness of evaluation, please ensure that your quotation includes the following details:', '',
+      '•  Technical datasheet for the quoted item',
+      '•  Confirmed delivery lead time (please state possible downtime for holiday)',
+      '•  Estimated net and gross weight (for logistics and freight assessment)',
+      '•  Relevant product certifications, where applicable',
+      '•  Optional Seafreight, courier or freight charges to ' + place + '.', '',
+      'Please note that quotations should be valid and submitted no later than ' + (closingForEmail(r.closing) || '[closing date]') + ' (Malaysia time[UTC +8]).', '',
+      'Warmest Regards,', '', signature].join('\n');
+  }
+
   function registerSection(sections) {
     return sections.filter(function (s) { return live(s) && s.template === 'suppliers'; })[0];
   }
@@ -292,6 +335,32 @@ var Core = (function () {
       return log;
     }
 
+    function mailTask(id) {
+      var r = store.all('sourcing').filter(function (x) { return x.id === id; })[0];
+      if (!r) throw fail('NOT_FOUND', 'This task is no longer in RFQ Sourcing.');
+      return r;
+    }
+    /** Everything that must be true before an RFQ email is made or sent. Returns the email settings. */
+    function mailReady(r, skipAsana, needApproval) {
+      if (needApproval && r.status !== 'approved') throw fail('NOT_APPROVED', 'Approve the supplier list first.');
+      if (!String(r.emailSubject || '').trim()) throw fail('BAD_REQUEST', 'Enter the email title and save first.');
+      if (!String(r.deliveryLocation || '').trim()) throw fail('BAD_REQUEST', 'Enter the delivery location and save first.');
+      if (!rfqItemsText(r.items)) throw fail('BAD_REQUEST', 'This task has no items to quote.');
+      if (!r.closing) throw fail('BAD_REQUEST', 'This task has no closing date in RFQ Hub.');
+      var due = Date.parse(r.closing.length > 10 ? r.closing + ':00+08:00' : r.closing + 'T23:59:00+08:00');
+      if (needApproval && due < Date.now()) throw fail('BAD_REQUEST', 'The closing date of this task has passed.');
+      var setR = store.all('settings').filter(function (x) { return x.id === 'email'; })[0];
+      if (!setR || !setR.signature || !setR.fromEmail) throw fail('SETUP', 'A super admin must fill in the email settings first.');
+      var account = String(store.mail.status().account || '').toLowerCase();
+      if (account !== String(setR.fromEmail).toLowerCase()) throw fail('SETUP', 'This platform is connected to ' + account + ', not ' + setR.fromEmail + '. Nothing was sent.');
+      if (!skipAsana) {
+        var have = arr(r.mailFiles).map(function (f) { return f.name; });
+        var missing = asanaOnlyFiles(r.items).filter(function (n) { return have.indexOf(n) < 0; });
+        if (missing.length) throw fail('MISSING_FILES', 'Still only in Asana: ' + missing.join(', '));
+      }
+      return setR;
+    }
+
     switch (action) {
       case 'bootstrap': {
         var items = store.all('items').filter(function (it) { return can.seeItem(ctx, it, secById[it.sectionId]); });
@@ -308,6 +377,8 @@ var Core = (function () {
           items: items,
           comments: store.all('comments').filter(function (c) { return vis[c.itemId]; }),
           sourcing: sourcingAccess(ctx, sections).view ? store.all('sourcing') : [],
+          emails: sourcingAccess(ctx, sections).view ? store.all('emails') : [],
+          settings: sourcingAccess(ctx, sections).view ? (store.all('settings').filter(function (x) { return x.id === 'email'; })[0] || null) : null,
           // Own rows, plus everyone's rows on sections this person manages (managers see who is on their team).
           access: me.isSuper ? access : access.filter(function (a) {
             return a.userId === me.id || (live(secById[a.sectionId]) && level(ctx, a.sectionId) === 'manager');
@@ -387,8 +458,116 @@ var Core = (function () {
         return { sourcing: rec };
       }
 
+      case 'settings.save': {
+        needSuper();
+        var seenCc = {};
+        var cc = String(p.cc || '').split(/[;,\s]+/).map(function (x) { return x.trim().toLowerCase(); }).filter(function (x) {
+          if (!x || seenCc[x]) return false;
+          if (!EMAIL_RE.test(x)) throw fail('BAD_REQUEST', 'Check this CC address: ' + x);
+          seenCc[x] = true;
+          return true;
+        });
+        var from = String(p.fromEmail || '').trim().toLowerCase();
+        if (!EMAIL_RE.test(from)) throw fail('BAD_REQUEST', 'Enter the Gmail address that sends the RFQ emails.');
+        var hadSet = store.all('settings').filter(function (x) { return x.id === 'email'; })[0];
+        var setRec = { id: 'email', fromEmail: from, cc: cc.join('; '), signature: String(p.signature || '').trim().slice(0, 2000), updatedBy: me.id, updatedAt: now };
+        if (hadSet) store.save('settings', setRec); else store.insert('settings', setRec);
+        return { settings: setRec };
+      }
+
+      case 'mail.status': {
+        if (!sourcingAccess(ctx, sections).view) throw fail('FORBIDDEN', 'You do not have access to RFQ Sourcing.');
+        return store.mail.status();
+      }
+
+      case 'sourcing.attach': {
+        // A copy of an RFQ Hub file in this platform's Drive, because the sending account cannot open RFQ Hub's files.
+        if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can prepare RFQ emails.');
+        var recA = mailTask(p.itemId);
+        var kept = arr(recA.mailFiles);
+        if (kept.some(function (f) { return f.hubFileId === p.hubFileId; })) return { sourcing: recA };
+        var metaA = store.saveFile({ sectionId: 'sourcing', id: recA.id }, String(p.fileName || 'file').slice(0, 200), String(p.mimeType || 'application/octet-stream'), String(p.base64 || ''), me.id);
+        metaA.hubFileId = String(p.hubFileId || '');
+        recA.mailFiles = kept.concat([metaA]);
+        recA.updatedAt = now;
+        store.save('sourcing', recA);
+        return { sourcing: recA };
+      }
+
+      case 'sourcing.clearDrafts': {
+        if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can prepare RFQ emails.');
+        var oldDrafts = store.all('emails').filter(function (e) { return e.taskId === p.itemId && (e.status === 'draft' || e.status === 'failed'); });
+        oldDrafts.forEach(function (e) { store.mail.deleteDraft(e.draftId); store.del('emails', e.id); });
+        return { removed: oldDrafts.length };
+      }
+
+      case 'sourcing.prepare': {
+        if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can prepare RFQ emails.');
+        var recP = mailTask(p.itemId);
+        var setP = mailReady(recP, !!p.skipAsana, true);
+        var addr = String(p.email || '').toLowerCase();
+        var supP = arr(recP.suppliers).filter(function (x) { return x.email === addr; })[0];
+        if (!supP) throw fail('NOT_FOUND', addr + ' is not on the approved list.');
+        var sameAddr = store.all('emails').filter(function (e) { return e.taskId === recP.id && e.email === addr; })[0];
+        if (sameAddr && sameAddr.status === 'sent') return { skipped: true, email: sameAddr };
+        if (sameAddr) { store.mail.deleteDraft(sameAddr.draftId); store.del('emails', sameAddr.id); }
+        var bodyP = rfqEmailBody(recP, setP);
+        var made = store.mail.createDraft({ to: addr, cc: setP.cc, subject: recP.emailSubject, body: bodyP, fileIds: arr(recP.mailFiles).map(function (f) { return f.id; }) });
+        var em = {
+          id: store.uid(), taskId: recP.id, email: addr, company: supP.company, cc: setP.cc, subject: recP.emailSubject, body: bodyP,
+          draftId: made.draftId, messageId: made.messageId, threadId: '', status: 'draft', error: '', listApprovedAt: recP.approvedAt,
+          createdBy: me.id, createdAt: now, sentBy: '', sentAt: '', updatedAt: now,
+        };
+        store.insert('emails', em);
+        return { email: em };
+      }
+
+      case 'sourcing.send': {
+        // One email per call, so a failure stops the batch and nothing is sent twice.
+        if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can send RFQ emails.');
+        var emS = store.all('emails').filter(function (e) { return e.id === p.emailId; })[0];
+        if (!emS) throw fail('NOT_FOUND', 'This draft no longer exists. Create the drafts again.');
+        if (emS.status === 'sent') return { email: emS };
+        if (emS.status === 'sending') throw fail('CHECK_GMAIL', 'A send to ' + emS.email + ' did not finish. Check Sent in Gmail before trying again.');
+        var recS = mailTask(emS.taskId);
+        var setS = mailReady(recS, true, true);
+        var stillListed = arr(recS.suppliers).some(function (x) { return x.email === emS.email; });
+        if (!stillListed || emS.listApprovedAt !== recS.approvedAt || emS.subject !== recS.emailSubject || emS.cc !== setS.cc || emS.body !== rfqEmailBody(recS, setS)) {
+          throw fail('STALE', 'The task, list or email settings changed after this draft was made. Create the drafts again.');
+        }
+        emS.status = 'sending';
+        emS.updatedAt = now;
+        store.save('emails', emS);
+        try {
+          var sent = store.mail.sendDraft(emS.draftId);
+          emS.status = 'sent';
+          emS.messageId = sent.messageId;
+          emS.threadId = sent.threadId;
+          emS.error = '';
+          emS.sentBy = me.id;
+          emS.sentAt = store.now();
+        } catch (mailErr) {
+          emS.status = 'failed';
+          emS.error = String(mailErr.message || mailErr).slice(0, 300);
+        }
+        emS.updatedAt = store.now();
+        store.save('emails', emS);
+        return { email: emS };
+      }
+
+      case 'sourcing.test': {
+        // Goes only to the person pressing the button, with no CC.
+        if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can send a test email.');
+        var recT = mailTask(p.itemId);
+        var setT = mailReady(recT, true, false);
+        store.mail.sendTest({ to: me.id, subject: '[TEST] ' + recT.emailSubject, body: rfqEmailBody(recT, setT), fileIds: arr(recT.mailFiles).map(function (f) { return f.id; }) });
+        return { to: me.id, status: store.mail.status() };
+      }
+
       case 'sourcing.remove': {
         if (!sourcingAccess(ctx, sections).edit) throw fail('FORBIDDEN', 'You can view RFQ Sourcing but not change it.');
+        if (store.all('emails').some(function (e) { return e.taskId === p.itemId && e.status !== 'draft' && e.status !== 'failed'; })) throw fail('BAD_REQUEST', 'RFQ emails were already sent for this task, so it cannot be removed.');
+        store.all('emails').filter(function (e) { return e.taskId === p.itemId; }).forEach(function (e) { store.mail.deleteDraft(e.draftId); store.del('emails', e.id); });
         store.del('sourcing', p.itemId);
         return { id: p.itemId };
       }
@@ -599,6 +778,6 @@ var Core = (function () {
 
   return {
     SUPER_ADMINS: SUPER_ADMINS, isSuperId: isSuperId, LEVELS: LEVELS, FIELD_TYPES: FIELD_TYPES, COLORS: COLORS,
-    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
+    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, rfqItemsText: rfqItemsText, asanaOnlyFiles: asanaOnlyFiles, rfqEmailBody: rfqEmailBody, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
   };
 })();

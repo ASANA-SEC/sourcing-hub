@@ -18,6 +18,16 @@
   3. 按 **Approve final list** 批准。批准后再保存修改，名单会退回草稿
   4. **Refresh from RFQ Hub** 重新读取任务内容，供应商名单和批准状态不变
 
+- **RFQ 邮件**（任务页下方）：
+  1. **Send test to me** 只发给按按钮的人，没有 CC，标题加 `[TEST]`
+  2. **Create drafts** 先重新读取 RFQ Hub 的任务和附件，再在发信账号的 Gmail 为每个供应商建一封草稿
+  3. **Approve and send** 要按两次，一封一封发，出错就停，不会重复发
+  4. 名单、任务内容或邮件设定改过之后，旧草稿不能发，要重新建
+  5. 附件只在 Asana 的任务默认不能建草稿，要先上传到 RFQ Hub，或者勾选不带这些文件
+- **Email settings**（Super admin）：发信账号、CC 和签名，存在私有的 Google Sheet，不进公开仓库
+
+**Gmail 限制：** Google 对普通 Gmail 账号的脚本发信限制是每天 100 个收件人，CC 可能也计入。页面会显示当天剩余额度；超过时 Google 会拒发，系统会停下并显示错误。
+
 **权限跟 Supplier Register 走：** Viewer 只能看，Editor 可以修改，Manager 和 Super admin 可以批准。要读取 RFQ Hub，使用者也要有 RFQ Hub 的账号和权限。
 
 ## 上线步骤（Sam 做，约 5 分钟）

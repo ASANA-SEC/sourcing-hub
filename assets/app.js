@@ -290,6 +290,8 @@
       S.comments = res.comments || [];
       S.access = res.access || [];
       S.sourcing = res.sourcing || [];
+      S.emails = res.emails || [];
+      S.settings = res.settings || null;
       if (!S.loaded) { S.loaded = true; renderShell(); }
       render();
     } catch (e) {
@@ -444,7 +446,7 @@
       + (srcAccess().view ? link('#sourcing', 'sourcing', 'RFQ Sourcing', svg('sourcing')) : '');
     const secs = liveSections();
     if (secs.length) html += '<div class="nav-h">Sections</div>' + secs.map((s) => link('#s/' + s.id, 's/' + s.id, esc(s.name), secMark(s))).join('');
-    if (S.me.isSuper) html += '<div class="nav-h">Super admin</div>' + link('#sections', 'sections', 'Manage sections', svg('sections')) + link('#team', 'team', 'Users &amp; access', svg('team'));
+    if (S.me.isSuper) html += '<div class="nav-h">Super admin</div>' + link('#sections', 'sections', 'Manage sections', svg('sections')) + link('#team', 'team', 'Users &amp; access', svg('team')) + link('#mailsettings', 'mailsettings', 'Email settings', svg('sourcing'));
     const nav = $('#nav');
     nav.innerHTML = html;
     nav.querySelectorAll('a').forEach((a) => a.classList.toggle('on', a.dataset.nav === active));
@@ -474,6 +476,7 @@
     else if (r.view === 'calendar') { html = viewCalendar(); title = 'Calendar'; }
     else if (r.view === 'performance') { html = viewPerformance(); title = 'Team performance'; }
     else if (r.view === 'sourcing') { html = r.id ? viewSourcingTask(r.id) : viewSourcing(); title = 'RFQ Sourcing'; }
+    else if (r.view === 'mailsettings') { html = viewMailSettings(); title = 'Email settings'; }
     else if (r.view === 'sections') { html = viewSections(); title = 'Manage sections'; }
     else if (r.view === 'team') { html = viewTeam(); title = 'Users & access'; }
     else { html = viewDashboard(); nav = 'dashboard'; }
@@ -1609,45 +1612,6 @@
     if (route().view === 'sourcing') render();
   }
 
-  // ---- email text
-
-  const ASANA_FILES_RE = /^\s*Attachments in Asana \(not copied\):\s*(.*)$/i;
-
-  /** What the RFQ task asks for, without the internal DUE line and the note about files left in Asana. */
-  function rfqItemsText(r) {
-    return String(r.items || '').split(/\r?\n/).filter((l) => !/^\s*DUE\s*:/i.test(l) && !ASANA_FILES_RE.test(l)).join('\n').trim();
-  }
-
-  /** Files the Asana migration did not copy; the notes only name them. */
-  function asanaOnlyFiles(r) {
-    const line = String(r.items || '').split(/\r?\n/).map((l) => ASANA_FILES_RE.exec(l)).find(Boolean);
-    return line ? line[1].split(', ').filter(Boolean) : [];
-  }
-
-  /** "5 Nov 2026 at 11:00 PM", read straight from the stored Malaysia-time text. */
-  function closingForEmail(v) {
-    const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/.exec(v || '');
-    if (!m) return '';
-    const date = +m[3] + ' ' + MON[+m[2] - 1] + ' ' + m[1];
-    if (!m[4]) return date;
-    const h = +m[4];
-    return date + ' at ' + (h % 12 || 12) + ':' + m[5] + (h < 12 ? ' AM' : ' PM');
-  }
-
-  function rfqEmailBody(r, location) {
-    const place = location ? (/malaysia/i.test(location) ? location : location + ', Malaysia') : '[delivery location]';
-    return ['Dear Sir / Madam,', '', 'We trust this email finds you well.', '', 'Kindly submit your formal quotation for the item specified Below:', '',
-      rfqItemsText(r), '',
-      'For completeness of evaluation, please ensure that your quotation includes the following details:', '',
-      '•  Technical datasheet for the quoted item',
-      '•  Confirmed delivery lead time (please state possible downtime for holiday)',
-      '•  Estimated net and gross weight (for logistics and freight assessment)',
-      '•  Relevant product certifications, where applicable',
-      '•  Optional Seafreight, courier or freight charges to ' + place + '.', '',
-      'Please note that quotations should be valid and submitted no later than ' + (closingForEmail(r.closing) || '[closing date]') + ' (Malaysia time[UTC +8]).', '',
-      'Warmest Regards,'].join('\n');
-  }
-
   // ---- screens
 
   function srcDraft(id) {
@@ -1741,16 +1705,15 @@
     const a = srcAccess();
     const d = srcDraft(id);
     const past = r.closing && hoursUntil(r.closing) < 0;
-    const items = rfqItemsText(r);
-    const asanaOnly = asanaOnlyFiles(r);
+    const items = Core.rfqItemsText(r.items);
+    const mailFiles = (r.mailFiles || []).map((f) => f.name);
     const reg = a.edit ? registerSuppliers() : [];
     return `
       <div class="head"><div><a href="#sourcing">‹ RFQ Sourcing</a><h1>${esc(r.title)}</h1>
         <div class="sub">${esc(r.hubSectionName || 'RFQ Hub')} · ${esc(r.rfqNo || 'No RFQ no.')} · Closing ${esc(fmtDT(r.closing))} ${past ? '<span class="chip crit">Closing date has passed</span>' : ''}</div></div>
         <div class="toolbar">${srcStatusChip(r)}${a.edit ? `<button class="btn" data-act="src-refresh" data-id="${esc(id)}">Refresh from RFQ Hub</button>` : ''}</div></div>
       <div class="group"><h2>Items to quote</h2><pre class="src-pre">${items ? esc(items) : '<span class="muted">The Notes of this task are empty.</span>'}</pre></div>
-      <div class="group"><h2>Attachments</h2>${(r.files || []).length ? `<ul class="src-files">${r.files.map((f) => `<li>${esc(f.name)}</li>`).join('')}</ul>` : (asanaOnly.length ? '' : '<p class="muted">None on this task.</p>')}
-        ${asanaOnly.length ? `<div class="banner"><b>Only in Asana</b><span>Add these to the RFQ Hub task before sending, then refresh: ${esc(asanaOnly.join(', '))}</span></div>` : ''}</div>
+      <div class="group"><h2>Attachments</h2>${(r.files || []).length ? `<ul class="src-files">${r.files.map((f) => `<li>${esc(f.name)}</li>`).join('')}</ul>` : '<p class="muted">None on this task.</p>'}${mailFiles.length ? `<p class="muted">Copied for the emails: ${esc(mailFiles.join(', '))}</p>` : ''}</div>
       <form id="srcForm" data-id="${esc(id)}" novalidate>
         <div class="group"><h2>Email details</h2><div class="src-fields">
           <label class="fld"><span>Email title</span><input name="emailSubject" value="${esc(d.emailSubject)}"${a.edit ? '' : ' disabled'}></label>
@@ -1768,7 +1731,8 @@
           ${r.status === 'approved' ? `<p class="muted">Approved by ${esc(userName(r.approvedBy))} on ${esc(fmtDT(r.approvedAt))}. Saving a change returns the list to draft.</p>` : ''}
         </div>
       </form>
-      <details class="group"><summary>Email preview</summary><pre class="src-pre">${esc(rfqEmailBody(r, d.deliveryLocation))}</pre><p class="muted">The signature and CC list are added when the email is drafted. Nothing is sent from this page.</p></details>`;
+      <details class="group"><summary>Email preview</summary><p class="muted"><b>${esc(d.emailSubject || '[email title]')}</b></p><pre class="src-pre">${esc(Core.rfqEmailBody(Object.assign({}, r, { deliveryLocation: d.deliveryLocation }), S.settings))}</pre></details>
+      ${emailPanel(r, a, d)}`;
   }
 
   // ---- actions
@@ -1839,6 +1803,170 @@
       delete srcState.drafts[id];
       toast('Task removed from RFQ Sourcing');
       location.hash = '#sourcing';
+    } catch (e) { handleError(e); }
+  }
+
+  // ---- RFQ emails
+
+  const srcMails = (id) => (S.emails || []).filter((e) => e.taskId === id);
+  const mailStale = (r, e) => r.status !== 'approved' || e.listApprovedAt !== r.approvedAt || e.subject !== r.emailSubject
+    || e.cc !== (S.settings || {}).cc || e.body !== Core.rfqEmailBody(r, S.settings);
+  const gmailUrl = (hash) => `https://mail.google.com/mail/u/?authuser=${encodeURIComponent((S.settings || {}).fromEmail || '')}#${hash}`;
+
+  function mailChip(e, stale) {
+    if (e.status === 'sent') return `<span class="chip ok">Sent ${esc(fmtDT(e.sentAt))}</span>`;
+    if (e.status === 'failed') return `<span class="chip crit" title="${esc(e.error)}">Failed</span>`;
+    if (e.status === 'sending') return '<span class="chip crit">Check Gmail</span>';
+    return stale ? '<span class="chip warn">Out of date</span>' : '<span class="chip info">Draft</span>';
+  }
+
+  function mailQuotaLine(unsent) {
+    const st = srcState.mailStatus;
+    const per = 1 + String((S.settings || {}).cc || '').split('; ').filter(Boolean).length;
+    if (!st) { if (!srcState.mailLoading) setTimeout(srcMailLoad); return ''; }
+    if (st.error) return `<p class="muted">Could not read the Gmail limit: ${esc(st.error)}</p>`;
+    const need = unsent * per;
+    const short = need > st.remaining;
+    return `<p class="${short ? 'src-warn' : 'muted'}">Sending from ${esc(st.account)}. Google allows ${esc(String(st.remaining))} more recipients today; ${unsent} emails to send use up to ${need} (${per} each, counting CC).${short ? ' Not all of them can go today.' : ''}</p>`;
+  }
+
+  function emailPanel(r, a, d) {
+    const set = S.settings;
+    if (!set || !set.signature) return `<div class="group"><h2>RFQ emails</h2><div class="banner"><b>Email settings needed</b><span>${S.me.isSuper ? '<a href="#mailsettings">Fill in the sender, CC list and signature</a> first.' : 'A super admin must fill in the sender, CC list and signature first.'}</span></div></div>`;
+    const mails = srcMails(r.id);
+    const unsentList = mails.filter((e) => e.status === 'draft' || e.status === 'failed');
+    const freshUnsent = unsentList.filter((e) => !mailStale(r, e));
+    const anyStale = unsentList.some((e) => mailStale(r, e));
+    const asana = Core.asanaOnlyFiles(r.items).filter((n) => !(r.mailFiles || []).some((f) => f.name === n));
+    const dr = srcDraft(r.id);
+    const unsaved = dr.edited || (dr.emailSubject || '') !== (r.emailSubject || '') || (dr.deliveryLocation || '') !== (r.deliveryLocation || '');
+    const missing = [];
+    if (r.status !== 'approved') missing.push('approve the supplier list');
+    if (unsaved) missing.push('save your changes');
+    if (!r.emailSubject) missing.push('enter the email title');
+    if (!r.deliveryLocation) missing.push('enter the delivery location');
+    const busy = srcState.mailBusy;
+    const canDraft = a.approve && !missing.length && !busy && (!asana.length || srcState.skipAsana === r.id);
+    const rows = mails.map((e) => `<tr><td class="title">${esc(e.company || '—')}</td><td class="nw">${esc(e.email)}</td><td class="nw">${mailChip(e, mailStale(r, e))}</td>
+      <td class="nw">${e.status === 'sent' ? `<a href="${esc(gmailUrl('all/' + e.threadId))}" target="_blank" rel="noopener">Open email</a>` : `<a href="${esc(gmailUrl('drafts?compose=' + e.messageId))}" target="_blank" rel="noopener">Open draft</a>`}</td></tr>`).join('');
+    return `<div class="group"><h2>RFQ emails</h2>
+      <p class="muted">From ${esc(set.fromEmail)} · CC ${esc(set.cc || 'none')}</p>
+      ${asana.length ? `<div class="banner"><b>Only in Asana</b><span>Upload to the RFQ Hub task, then create the drafts: ${esc(asana.join(', '))}</span></div>
+        <label class="fld chk src-skip"><input type="checkbox" id="srcSkipAsana" ${srcState.skipAsana === r.id ? 'checked' : ''}><span>Create the drafts without these files</span></label>` : ''}
+      ${missing.length ? `<p class="muted">Before making drafts: ${esc(missing.join(', '))}.</p>` : ''}
+      ${busy ? `<p class="src-warn">${esc(busy)}</p>` : ''}
+      ${mails.length ? `<div class="tablewrap"><table class="t"><thead><tr><th>Company</th><th>To</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
+      ${anyStale ? '<p class="src-warn">The task, list or settings changed. Create the drafts again before sending.</p>' : ''}
+      ${mails.some((e) => e.status === 'failed') ? `<p class="src-warn">${esc(mails.find((e) => e.status === 'failed').error)}</p>` : ''}
+      ${a.approve ? `<div class="form-actions src-actions">
+        <button type="button" class="btn" data-act="src-test" data-id="${esc(r.id)}" ${busy || unsaved || !r.emailSubject || !r.deliveryLocation ? 'disabled' : ''}>Send test to me</button>
+        <button type="button" class="btn" data-act="src-prepare" data-id="${esc(r.id)}" ${canDraft ? '' : 'disabled'}>${unsentList.length ? 'Create drafts again' : 'Create drafts'}</button>
+        <span class="sp"></span>
+        ${freshUnsent.length && !anyStale ? `<button type="button" class="btn ${srcState.armedSend === r.id ? 'danger armed' : 'primary'}" data-act="src-send" data-id="${esc(r.id)}" ${busy || unsaved ? 'disabled' : ''}>${srcState.armedSend === r.id ? `Click again to send ${freshUnsent.length} now` : `Approve and send ${freshUnsent.length} emails`}</button>` : ''}
+      </div>${freshUnsent.length ? mailQuotaLine(freshUnsent.length) : ''}` : ''}
+    </div>`;
+  }
+
+  async function srcMailLoad() {
+    srcState.mailLoading = true;
+    try { srcState.mailStatus = await API.call('mail.status'); } catch (e) { srcState.mailStatus = { error: e.message }; }
+    srcState.mailLoading = false;
+    if (route().view === 'sourcing' || route().view === 'mailsettings') render();
+  }
+
+  function setBusy(text) { srcState.mailBusy = text; render(); }
+
+  /** Read the task again from RFQ Hub and copy its files here, so the drafts use the latest closing date and items. */
+  async function srcPull(id) {
+    await hubLoad();
+    if (srcState.hub.error) throw new Error(srcState.hub.error);
+    const it = srcState.hub.items.find((x) => x.id === id);
+    const s = it && srcState.hub.sections.find((x) => x.id === it.sectionId);
+    if (!s) throw new Error('This task is no longer in RFQ Hub.');
+    const res = await API.call('sourcing.import', { task: hubTask(s, it) });
+    srcKeep(res.sourcing);
+    delete srcState.drafts[id];
+    return res.sourcing;
+  }
+
+  async function srcPrepare(id) {
+    try {
+      setBusy('Reading the latest task from RFQ Hub…');
+      let r = await srcPull(id);
+      for (const f of r.files || []) {
+        if ((r.mailFiles || []).some((m) => m.hubFileId === f.id)) continue;
+        setBusy('Copying attachment: ' + f.name);
+        const file = await API.hubCall('item.file', { id, fileId: f.id });
+        r = (await API.call('sourcing.attach', { itemId: id, hubFileId: f.id, fileName: f.name, mimeType: f.mimeType, base64: file.base64 })).sourcing;
+        srcKeep(r);
+      }
+      await API.call('sourcing.clearDrafts', { itemId: id });
+      let i = 0;
+      for (const sup of r.suppliers || []) {
+        i += 1;
+        setBusy(`Creating draft ${i} of ${r.suppliers.length}: ${sup.email}`);
+        await API.call('sourcing.prepare', { itemId: id, email: sup.email, skipAsana: srcState.skipAsana === id });
+      }
+      await loadData(true);
+      toast(`${i} drafts ready in Gmail. Nothing has been sent.`);
+    } catch (e) { handleError(e); await loadData(true); }
+    setBusy('');
+  }
+
+  async function srcSend(id) {
+    if (srcState.armedSend !== id) { srcState.armedSend = id; render(); return; }
+    srcState.armedSend = '';
+    const list = srcMails(id).filter((e) => e.status === 'draft' || e.status === 'failed');
+    let sent = 0;
+    try {
+      for (const e of list) {
+        setBusy(`Sending ${sent + 1} of ${list.length}: ${e.email}`);
+        const res = await API.call('sourcing.send', { emailId: e.id });
+        if (res.email.status !== 'sent') throw new Error(`Stopped at ${e.email}: ${res.email.error}`);
+        sent += 1;
+      }
+      toast(`${sent} RFQ emails sent`);
+    } catch (e) {
+      toast(`${sent} of ${list.length} sent. ${e.message}`, true);
+    }
+    srcState.mailStatus = null;
+    await loadData(true);
+    setBusy('');
+  }
+
+  async function srcTest(id) {
+    try {
+      setBusy('Sending a test email to you…');
+      const res = await API.call('sourcing.test', { itemId: id });
+      srcState.mailStatus = res.status;
+      toast('Test email sent to ' + res.to + ' only');
+    } catch (e) { handleError(e); }
+    setBusy('');
+  }
+
+  // ---- email settings (kept in the private Sheet, not in the public code)
+
+  function viewMailSettings() {
+    if (!S.me.isSuper) return '<div class="empty-state"><b>Super admin only</b></div>';
+    const set = S.settings || {};
+    const st = srcState.mailStatus;
+    if (!st && !srcState.mailLoading) setTimeout(srcMailLoad);
+    return `<div class="head"><div><h1>Email settings</h1><div class="sub">Used for every RFQ email. Saved in the private Google Sheet.</div></div></div>
+      <form id="mailSettings" class="src-settings" novalidate>
+        <label class="fld"><span>Send from (must match the account the backend runs on)</span><input name="fromEmail" type="email" value="${esc(set.fromEmail || '')}"></label>
+        <label class="fld"><span>CC on every RFQ email</span><textarea name="cc" rows="3">${esc(set.cc || '')}</textarea></label>
+        <label class="fld"><span>Signature (printed under “Warmest Regards,”)</span><textarea name="signature" rows="9">${esc(set.signature || '')}</textarea></label>
+        <div class="form-actions"><button type="submit" class="btn primary">Save</button></div>
+      </form>
+      <p class="muted">${st ? (st.error ? esc(st.error) : `This platform sends as ${esc(st.account)}. Google allows ${esc(String(st.remaining))} more recipients today.`) : 'Checking the Gmail connection…'}</p>`;
+  }
+
+  async function saveMailSettings(form) {
+    try {
+      const res = await API.call('settings.save', { fromEmail: form.elements.fromEmail.value, cc: form.elements.cc.value, signature: form.elements.signature.value });
+      S.settings = res.settings;
+      toast('Email settings saved');
+      render();
     } catch (e) { handleError(e); }
   }
 
@@ -2698,6 +2826,9 @@
       case 'src-add': { const dr = srcSync(); dr.suppliers.push({}); render(); break; }
       case 'src-del': { const dr = srcSync(); dr.suppliers.splice(Number(d.i), 1); render(); break; }
       case 'src-save': srcSubmit('sourcing.save'); break;
+      case 'src-prepare': srcPrepare(d.id); break;
+      case 'src-send': srcSend(d.id); break;
+      case 'src-test': srcTest(d.id); break;
       case 'src-import': srcImport(d.id, d.section); break;
       case 'src-refresh': srcRefresh(d.id); break;
       case 'src-remove': srcRemove(d.id); break;
@@ -2796,6 +2927,7 @@
   document.addEventListener('submit', (e) => {
     // getAttribute, not .id: a field named "id" or "email" would shadow the form's own properties
     const id = e.target.getAttribute('id');
+    if (id === 'mailSettings') { e.preventDefault(); saveMailSettings(e.target); return; }
     if (!['itemForm', 'userForm', 'sectionForm', 'dashExportForm', 'archiveForm', 'restoreForm'].includes(id)) return;
     e.preventDefault();
     if (id === 'archiveForm') runArchiveExport(e.target);
@@ -2839,6 +2971,7 @@
     const t = e.target;
     if (t.id === 'srcSection') { srcState.sectionId = t.value; srcState.stage = ''; render(); return; }
     if (t.id === 'srcStage') { srcState.stage = t.value; render(); return; }
+    if (t.id === 'srcSkipAsana') { srcState.skipAsana = t.checked ? route().id : ''; render(); return; }
     if (t.id === 'srcRegister') {
       const pick = registerSuppliers().find((x) => x.id === t.value);
       const dr = srcSync();

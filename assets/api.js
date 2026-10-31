@@ -6,6 +6,7 @@
   const CFG = window.APP_CONFIG || {};
   const DEMO_KEY = 'sourcinghub_demo_v1';
   const DEMO_USER = 'sourcinghub_demo_user';
+  const DEMO_FROM = 'buyer@example.com';
   const clone = (o) => JSON.parse(JSON.stringify(o));
 
   function ssGet(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
@@ -48,7 +49,7 @@
 
     // Read only: the same Google login is sent to RFQ Hub, which applies that person's own access there.
     async hubCall(action, payload) {
-      if (action !== 'bootstrap') throw new Error('RFQ Hub is read only here.');
+      if (action !== 'bootstrap' && action !== 'item.file') throw new Error('RFQ Hub is read only here.');
       let res;
       try {
         res = await fetch(CFG.RFQ_HUB_API_URL, {
@@ -110,7 +111,8 @@
       sup(3, 'Supplier D HVAC (example)', 'mechanical', 'Mr Kumar', '', 'Agent', 'Malaysia', 'evaluation', '', 'AHU, chillers', null),
       sup(4, 'Supplier F Trading (example)', 'valves', 'Mr Lim', 'lim@supplier-f.example.com', 'Supplier', 'Malaysia', 'blacklisted', 'c', 'Late deliveries 2025', null),
     ];
-    return { users, sections, access, items, comments: [], sourcing: [] };
+    return { users, sections, access, items, comments: [], sourcing: [], emails: [],
+      settings: [{ id: 'email', fromEmail: DEMO_FROM, cc: 'colleague.one@example.com; colleague.two@example.com', signature: 'Example Buyer\n\nEXAMPLE COMPANY SDN BHD\nKuala Lumpur, Malaysia', updatedBy: SAM, updatedAt: stamp(-1) }] };
   }
 
   /** What RFQ Hub would answer in demo mode: one RFQ section with a Pending column. */
@@ -137,7 +139,7 @@
       if (db) return db;
       try { db = JSON.parse(localStorage.getItem(DEMO_KEY) || 'null'); } catch (e) { db = null; }
       if (!db || !Array.isArray(db.sections)) db = seed();
-      ['users', 'sections', 'access', 'items', 'comments', 'sourcing'].forEach((t) => { if (!Array.isArray(db[t])) db[t] = []; });
+      ['users', 'sections', 'access', 'items', 'comments', 'sourcing', 'emails', 'settings'].forEach((t) => { if (!Array.isArray(db[t])) db[t] = []; });
       persist();
       return db;
     }
@@ -158,8 +160,17 @@
       delWhere: (t, fn) => { db[t] = load()[t].filter((r) => !fn(r)); persist(); },
       now: () => new Date().toISOString(),
       uid: () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
-      saveFile: () => { throw noDrive(); },
+      saveFile: (item, name) => { if (item.sectionId === 'sourcing') return { id: 'demo_' + name, name, mimeType: 'application/pdf', size: 1 }; throw noDrive(); },
       readFile: () => { throw noDrive(); },
+      // Nothing leaves the browser in demo mode.
+      mail: {
+        quota: 100,
+        status() { return { account: DEMO_FROM, remaining: this.quota }; },
+        createDraft: () => ({ draftId: 'demo_draft', messageId: 'demo_msg' }),
+        deleteDraft: () => {},
+        sendDraft(id) { if (localStorage.getItem('sourcinghub_demo_fail')) throw new Error('Service invoked too many times for one day: email.'); this.quota -= 3; return { messageId: 'demo_' + Date.now(), threadId: 'demo_thread' }; },
+        sendTest() { this.quota -= 1; },
+      },
       reset: () => { try { localStorage.removeItem(DEMO_KEY); } catch (e) { /* blocked */ } db = null; },
     };
   }
@@ -191,7 +202,7 @@
       this.me = Core.identify(store, this.me.id, '');
       return clone(Core.handle(store, this.me, action, payload || {}));
     },
-    async hubCall() { return clone(demoHub()); },
+    async hubCall(action) { return action === 'item.file' ? { name: 'example', mimeType: 'application/pdf', base64: 'QQ==' } : clone(demoHub()); },
     async upload(id, file) {
       return this.call('item.upload', { id, fileName: file.name, mimeType: file.type, base64: '' });
     },

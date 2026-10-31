@@ -590,3 +590,6 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13px; }
 .src-sup input:disabled, .src-sup select:disabled { background: var(--surface-2); color: var(--ink-2); }
 .src-sup td a { font-size: 12px; }
 .src-actions { margin-top: 10px; }
+.src-warn { color: var(--warn); }
+.src-skip { padding-top: 6px; }
+.src-settings { display: grid; gap: 12px; max-width: 620px; margin: 14px 0; }
