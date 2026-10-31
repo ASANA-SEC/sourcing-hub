@@ -5,7 +5,7 @@
 window.APP_CONFIG = {
   COMPANY_NAME: 'Sourcing Hub',
   CURRENCY: 'RM',
-  API_URL: '',
+  API_URL: 'https://script.google.com/macros/s/AKfycbx8m_EhMlsj9M86PXKXSM9Itgsdo8OqIRN9KnpgyqHOde84Q2QpzgC7zUL8RKsnPc9h/exec',
   // RFQ Hub is only read from, with the signed-in person's own Google login.
   RFQ_HUB_API_URL: 'https://script.google.com/macros/s/AKfycbzqnQbtbUPXBPh10b68hOGaZ-wySK29SkNJ3WgHgsDwfbIbeOALHX39hMYP7kks6Eab/exec',
   GOOGLE_CLIENT_ID: '565076969693-m0aeshobnlvb0p542p3flt0g6cudjopi.apps.googleusercontent.com',
