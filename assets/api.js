@@ -112,7 +112,7 @@
       sup(4, 'Supplier F Trading (example)', 'valves', 'Mr Lim', 'lim@supplier-f.example.com', 'Supplier', 'Malaysia', 'blacklisted', 'c', 'Late deliveries 2025', null),
     ];
     return { users, sections, access, items, comments: [], sourcing: [], emails: [], quotes: [],
-      settings: [{ id: 'email', fromEmail: DEMO_FROM, cc: 'colleague.one@example.com; colleague.two@example.com', signature: 'Example Buyer\n\nEXAMPLE COMPANY SDN BHD\nKuala Lumpur, Malaysia', updatedBy: SAM, updatedAt: stamp(-1), notifyEmail: SAM, followUpOn: false, volumetricDivisor: 5000, freightRates: 'Singapore, Labuan, 12', rates: { USD: { rate: 4.056, date: day(-1) }, SGD: { rate: 3.1, date: day(-1) } } }] };
+      settings: [{ id: 'email', fromEmail: DEMO_FROM, cc: 'colleague.one@example.com; colleague.two@example.com', signature: 'Example Buyer\n\nEXAMPLE COMPANY SDN BHD\nKuala Lumpur, Malaysia\nEmail : ' + DEMO_FROM, updatedBy: SAM, updatedAt: stamp(-1), notifyEmail: SAM, followUpOn: false, relayEmail: 'buyer2@example.com', volumetricDivisor: 5000, freightRates: 'Singapore, Labuan, 12', rates: { USD: { rate: 4.056, date: day(-1) }, SGD: { rate: 3.1, date: day(-1) } } }] };
   }
 
   /** What RFQ Hub would answer in demo mode: one RFQ section with a Pending column. */
@@ -175,14 +175,14 @@
       // Nothing leaves the browser in demo mode.
       mail: {
         quota: 100,
-        status() { return { account: DEMO_FROM, remaining: this.quota }; },
-        createDraft: () => ({ draftId: 'demo_draft', messageId: 'demo_msg' }),
+        status(account) { if (account === 'down@example.com') throw new Error('The second sending account is not connected yet.'); return { account: account || DEMO_FROM, remaining: account && account !== DEMO_FROM ? 77 : this.quota }; },
+        createDraft(m, account) { demoLog('sourcinghub_demo_mail', { op: 'draft', to: m.to, account: account }); return { draftId: 'demo_draft', messageId: 'demo_msg' }; },
         deleteDraft: () => {},
-        sendDraft(id) { if (localStorage.getItem('sourcinghub_demo_fail')) throw new Error('Service invoked too many times for one day: email.'); this.quota -= 3; return { messageId: 'demo_' + Date.now(), threadId: 'demo_thread_' + id + '_' + Math.random().toString(36).slice(2, 8) }; },
-        sendTest() { this.quota -= 1; },
+        sendDraft(id, account) { demoLog('sourcinghub_demo_mail', { op: 'send', account: account }); if (localStorage.getItem('sourcinghub_demo_fail')) throw new Error('Service invoked too many times for one day: email.'); this.quota -= 3; return { messageId: 'demo_' + Date.now(), threadId: 'demo_thread_' + id + '_' + Math.random().toString(36).slice(2, 8) }; },
+        sendTest(m, account) { demoLog('sourcinghub_demo_mail', { op: 'test', to: m.to, account: account, body: m.body }); this.quota -= 1; },
         threadMessages(threadId) { return demoJson('sourcinghub_demo_replies')[threadId] || []; },
         threadFiles() { return { files: [{ name: 'Quote.pdf', kind: 'pdf', base64: 'JVBERi0=' }, { name: 'Prices.xlsx', kind: 'text', text: 'Item\tPrice' }], skipped: ['Old.xls'], text: 'Please see attached.' }; },
-        replyAll(threadId, body) { demoLog('sourcinghub_demo_outbox', { threadId, body }); this.quota -= 2; },
+        replyAll(threadId, body, account) { demoLog('sourcinghub_demo_outbox', { threadId, body, account }); this.quota -= 2; },
         notify(to, subject) { demoLog('sourcinghub_demo_alerts', { to, subject }); this.quota -= 1; },
       },
       reset: () => { try { localStorage.removeItem(DEMO_KEY); } catch (e) { /* blocked */ } db = null; },

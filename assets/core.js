@@ -260,10 +260,20 @@ var Core = (function () {
     var h = Number(m[4]);
     return date + ' at ' + (h % 12 || 12) + ':' + m[5] + (h < 12 ? ' AM' : ' PM');
   }
+  /** The Gmail account a task sends from; the main one unless the task picked another. */
+  function mailAccount(r, settings) {
+    return String((r && r.fromAccount) || (settings && settings.fromEmail) || '').toLowerCase();
+  }
+  /** The signature names the sending address, so it follows the account actually used. */
+  function signatureFor(r, settings) {
+    var sig = (settings && settings.signature) || '[signature]';
+    var from = mailAccount(r, settings);
+    return settings && settings.fromEmail && from !== settings.fromEmail ? sig.split(settings.fromEmail).join(from) : sig;
+  }
   function rfqEmailBody(r, settings) {
     var location = String(r.deliveryLocation || '');
     var place = location ? (/malaysia/i.test(location) ? location : location + ', Malaysia') : '[delivery location]';
-    var signature = (settings && settings.signature) || '[signature]';
+    var signature = signatureFor(r, settings);
     return ['Dear Sir / Madam,', '', 'We trust this email finds you well.', '', 'Kindly submit your formal quotation for the item specified Below:', '',
       rfqItemsText(r.items), '',
       'For completeness of evaluation, please ensure that your quotation includes the following details:', '',
@@ -351,8 +361,10 @@ var Core = (function () {
       if (needApproval && due < Date.now()) throw fail('BAD_REQUEST', 'The closing date of this task has passed.');
       var setR = store.all('settings').filter(function (x) { return x.id === 'email'; })[0];
       if (!setR || !setR.signature || !setR.fromEmail) throw fail('SETUP', 'A super admin must fill in the email settings first.');
-      var account = String(store.mail.status().account || '').toLowerCase();
-      if (account !== String(setR.fromEmail).toLowerCase()) throw fail('SETUP', 'This platform is connected to ' + account + ', not ' + setR.fromEmail + '. Nothing was sent.');
+      var from = mailAccount(r, setR);
+      if (from !== setR.fromEmail && from !== setR.relayEmail) throw fail('SETUP', from + ' is not one of the sending accounts in Email settings.');
+      var account = String(store.mail.status(from).account || '').toLowerCase();
+      if (account !== from) throw fail('SETUP', 'The backend for ' + from + ' is connected to ' + account + '. Nothing was sent.');
       if (!skipAsana) {
         var have = arr(r.mailFiles).map(function (f) { return f.name; });
         var missing = asanaOnlyFiles(r.items).filter(function (n) { return have.indexOf(n) < 0; });
@@ -449,9 +461,12 @@ var Core = (function () {
         var prior = store.all('sourcing').filter(function (r) { return r.id === p.itemId; })[0];
         if (!prior) throw fail('NOT_FOUND', 'This task is no longer in RFQ Sourcing.');
         var suppliers = cleanSuppliers(p.suppliers);
+        var setV = store.all('settings').filter(function (x) { return x.id === 'email'; })[0] || {};
+        var fromV = String(p.fromAccount || '').toLowerCase();
+        if (fromV && fromV !== setV.fromEmail && fromV !== setV.relayEmail) throw fail('BAD_REQUEST', fromV + ' is not one of the sending accounts in Email settings.');
         if (approving && !suppliers.length) throw fail('BAD_REQUEST', 'Add at least one supplier before approving.');
         var rec = Object.assign({}, prior, {
-          status: approving ? 'approved' : 'draft', suppliers: suppliers,
+          status: approving ? 'approved' : 'draft', suppliers: suppliers, fromAccount: fromV,
           emailSubject: String(p.emailSubject || '').trim().slice(0, 300), deliveryLocation: String(p.deliveryLocation || '').trim().slice(0, 200),
           approvedBy: approving ? me.id : '', approvedAt: approving ? now : '', updatedAt: now,
         });
@@ -471,10 +486,12 @@ var Core = (function () {
         var from = String(p.fromEmail || '').trim().toLowerCase();
         if (!EMAIL_RE.test(from)) throw fail('BAD_REQUEST', 'Enter the Gmail address that sends the RFQ emails.');
         var hadSet = store.all('settings').filter(function (x) { return x.id === 'email'; })[0];
+        var relay = String(p.relayEmail || '').trim().toLowerCase();
+        if (relay && !EMAIL_RE.test(relay)) throw fail('BAD_REQUEST', 'Check the second sending account.');
         var notify = String(p.notifyEmail || '').trim().toLowerCase();
         if (notify && !EMAIL_RE.test(notify)) throw fail('BAD_REQUEST', 'Check the address for supplier reply alerts.');
         var setRec = { id: 'email', fromEmail: from, cc: cc.join('; '), signature: String(p.signature || '').trim().slice(0, 2000), updatedBy: me.id, updatedAt: now, notifyEmail: notify, followUpOn: p.followUpOn === true,
-          rates: (hadSet && hadSet.rates) || {}, freightRates: String(p.freightRates || '').slice(0, 5000), volumetricDivisor: num(p.volumetricDivisor) || DEFAULT_VOLUMETRIC_DIVISOR };
+          rates: (hadSet && hadSet.rates) || {}, freightRates: String(p.freightRates || '').slice(0, 5000), volumetricDivisor: num(p.volumetricDivisor) || DEFAULT_VOLUMETRIC_DIVISOR, relayEmail: relay };
         if (hadSet) store.save('settings', setRec); else store.insert('settings', setRec);
         return { settings: setRec };
       }
@@ -485,8 +502,8 @@ var Core = (function () {
         var emF = store.all('emails').filter(function (x) { return x.id === p.emailId && x.status === 'sent'; })[0];
         if (!emF) throw fail('NOT_FOUND', 'This email was not sent.');
         var setF = store.all('settings').filter(function (x) { return x.id === 'email'; })[0] || {};
-        var oursF = String(setF.cc || '').split('; ').concat([String(store.mail.status().account || '')]).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
-        return store.mail.threadFiles(emF.threadId, oursF);
+        var oursF = String(setF.cc || '').split('; ').concat([String(setF.fromEmail || ''), String(setF.relayEmail || '')]).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+        return store.mail.threadFiles(emF.threadId, oursF, emF.fromAccount);
       }
 
       case 'quote.save': {
@@ -506,7 +523,7 @@ var Core = (function () {
 
       case 'mail.status': {
         if (!sourcingAccess(ctx, sections).view) throw fail('FORBIDDEN', 'You do not have access to RFQ Sourcing.');
-        return store.mail.status();
+        return store.mail.status(p.account);
       }
 
       case 'sourcing.attach': {
@@ -526,7 +543,7 @@ var Core = (function () {
       case 'sourcing.clearDrafts': {
         if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can prepare RFQ emails.');
         var oldDrafts = store.all('emails').filter(function (e) { return e.taskId === p.itemId && (e.status === 'draft' || e.status === 'failed'); });
-        oldDrafts.forEach(function (e) { store.mail.deleteDraft(e.draftId); store.del('emails', e.id); });
+        oldDrafts.forEach(function (e) { store.mail.deleteDraft(e.draftId, e.fromAccount); store.del('emails', e.id); });
         return { removed: oldDrafts.length };
       }
 
@@ -539,13 +556,13 @@ var Core = (function () {
         if (!supP) throw fail('NOT_FOUND', addr + ' is not on the approved list.');
         var sameAddr = store.all('emails').filter(function (e) { return e.taskId === recP.id && e.email === addr; })[0];
         if (sameAddr && sameAddr.status === 'sent') return { skipped: true, email: sameAddr };
-        if (sameAddr) { store.mail.deleteDraft(sameAddr.draftId); store.del('emails', sameAddr.id); }
+        if (sameAddr) { store.mail.deleteDraft(sameAddr.draftId, sameAddr.fromAccount); store.del('emails', sameAddr.id); }
         var bodyP = rfqEmailBody(recP, setP);
-        var made = store.mail.createDraft({ to: addr, cc: setP.cc, subject: recP.emailSubject, body: bodyP, fileIds: arr(recP.mailFiles).map(function (f) { return f.id; }) });
+        var made = store.mail.createDraft({ to: addr, cc: setP.cc, subject: recP.emailSubject, body: bodyP, fileIds: arr(recP.mailFiles).map(function (f) { return f.id; }) }, mailAccount(recP, setP));
         var em = {
           id: store.uid(), taskId: recP.id, email: addr, company: supP.company, cc: setP.cc, subject: recP.emailSubject, body: bodyP,
           draftId: made.draftId, messageId: made.messageId, threadId: '', status: 'draft', error: '', listApprovedAt: recP.approvedAt,
-          createdBy: me.id, createdAt: now, sentBy: '', sentAt: '', updatedAt: now,
+          createdBy: me.id, createdAt: now, sentBy: '', sentAt: '', updatedAt: now, fromAccount: mailAccount(recP, setP),
         };
         store.insert('emails', em);
         return { email: em };
@@ -561,14 +578,14 @@ var Core = (function () {
         var recS = mailTask(emS.taskId);
         var setS = mailReady(recS, true, true);
         var stillListed = arr(recS.suppliers).some(function (x) { return x.email === emS.email; });
-        if (!stillListed || emS.listApprovedAt !== recS.approvedAt || emS.subject !== recS.emailSubject || emS.cc !== setS.cc || emS.body !== rfqEmailBody(recS, setS)) {
+        if (!stillListed || mailAccount(emS, setS) !== mailAccount(recS, setS) || emS.listApprovedAt !== recS.approvedAt || emS.subject !== recS.emailSubject || emS.cc !== setS.cc || emS.body !== rfqEmailBody(recS, setS)) {
           throw fail('STALE', 'The task, list or email settings changed after this draft was made. Create the drafts again.');
         }
         emS.status = 'sending';
         emS.updatedAt = now;
         store.save('emails', emS);
         try {
-          var sent = store.mail.sendDraft(emS.draftId);
+          var sent = store.mail.sendDraft(emS.draftId, emS.fromAccount);
           emS.status = 'sent';
           emS.messageId = sent.messageId;
           emS.threadId = sent.threadId;
@@ -589,14 +606,14 @@ var Core = (function () {
         if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can send a test email.');
         var recT = mailTask(p.itemId);
         var setT = mailReady(recT, true, false);
-        store.mail.sendTest({ to: me.id, subject: '[TEST] ' + recT.emailSubject, body: rfqEmailBody(recT, setT), fileIds: arr(recT.mailFiles).map(function (f) { return f.id; }) });
-        return { to: me.id, status: store.mail.status() };
+        store.mail.sendTest({ to: me.id, subject: '[TEST] ' + recT.emailSubject, body: rfqEmailBody(recT, setT), fileIds: arr(recT.mailFiles).map(function (f) { return f.id; }) }, mailAccount(recT, setT));
+        return { to: me.id, status: store.mail.status(mailAccount(recT, setT)) };
       }
 
       case 'sourcing.remove': {
         if (!sourcingAccess(ctx, sections).edit) throw fail('FORBIDDEN', 'You can view RFQ Sourcing but not change it.');
         if (store.all('emails').some(function (e) { return e.taskId === p.itemId && e.status !== 'draft' && e.status !== 'failed'; })) throw fail('BAD_REQUEST', 'RFQ emails were already sent for this task, so it cannot be removed.');
-        store.all('emails').filter(function (e) { return e.taskId === p.itemId; }).forEach(function (e) { store.mail.deleteDraft(e.draftId); store.del('emails', e.id); });
+        store.all('emails').filter(function (e) { return e.taskId === p.itemId; }).forEach(function (e) { store.mail.deleteDraft(e.draftId, e.fromAccount); store.del('emails', e.id); });
         store.del('sourcing', p.itemId);
         return { id: p.itemId };
       }
@@ -837,7 +854,7 @@ var Core = (function () {
     var divisor = num(settings && settings.volumetricDivisor) || DEFAULT_VOLUMETRIC_DIVISOR;
     var rows = emails.filter(function (e) { return e.taskId === r.id && e.status === 'sent'; }).map(function (e) {
       var q = quotes.filter(function (x) { return x.id === e.id; })[0];
-      var row = { emailId: e.id, company: e.company, email: e.email, threadId: e.threadId, replyStatus: e.replyStatus || '', quoteStatus: q ? q.status : '', error: q ? q.error : '', confirmed: !!(q && q.status === 'confirmed'), warnings: [], lines: [] };
+      var row = { emailId: e.id, company: e.company, email: e.email, fromAccount: e.fromAccount || '', threadId: e.threadId, replyStatus: e.replyStatus || '', quoteStatus: q ? q.status : '', error: q ? q.error : '', confirmed: !!(q && q.status === 'confirmed'), warnings: [], lines: [] };
       if (!q || !q.data || !arr(q.data.items).length) return row;
       var d = q.data;
       var cur = String(d.currency || '').toUpperCase();
@@ -918,10 +935,10 @@ var Core = (function () {
   function comparisonEmail(r, rows, account) {
     function h(v) { return String(v === null || v === undefined || v === '' ? '—' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
     var td = 'style="border:1px solid #ccc;padding:5px;font-size:12px"';
-    var link = function (t) { return 'https://mail.google.com/mail/u/?authuser=' + encodeURIComponent(account) + '#all/' + t; };
+    var link = function (t, from) { return 'https://mail.google.com/mail/u/?authuser=' + encodeURIComponent(from || account) + '#all/' + t; };
     var quoted = rows.filter(function (x) { return x.lines.length; }).length;
     var body = rows.map(function (x) {
-      return '<tr>' + [x.company, x.lines.length ? x.quoteRef : (x.replyStatus === 'bounced' ? 'Bounced' : (x.replyStatus === 'query' ? 'Reply: decide' : 'No quotation')), x.itemRm, x.freightRm, x.freightSource, x.grossKg, x.volumetricKg, x.dimensions, x.sstRm, x.landedRm, x.leadTime, x.warnings ? x.warnings.join('; ') : ''].map(function (v) { return '<td ' + td + '>' + h(v) + '</td>'; }).join('') + '<td ' + td + '><a href="' + link(x.threadId) + '">Open</a></td></tr>';
+      return '<tr>' + [x.company, x.lines.length ? x.quoteRef : (x.replyStatus === 'bounced' ? 'Bounced' : (x.replyStatus === 'query' ? 'Reply: decide' : 'No quotation')), x.itemRm, x.freightRm, x.freightSource, x.grossKg, x.volumetricKg, x.dimensions, x.sstRm, x.landedRm, x.leadTime, x.warnings ? x.warnings.join('; ') : ''].map(function (v) { return '<td ' + td + '>' + h(v) + '</td>'; }).join('') + '<td ' + td + '><a href="' + link(x.threadId, x.fromAccount) + '">Open</a></td></tr>';
     }).join('');
     var head = ['Supplier', 'Quote', 'Items RM', 'Freight RM', 'Freight basis', 'Gross kg', 'Vol kg', 'Dimensions', 'SST RM', 'Total RM', 'Lead time', 'Check', 'Email'].map(function (v) { return '<th ' + td + '>' + v + '</th>'; }).join('');
     return '<p><b>' + h(r.title) + '</b><br>Closing ' + h(closingForEmail(r.closing)) + ' · Delivery ' + h(r.deliveryLocation) + ' · ' + quoted + ' of ' + rows.length + ' suppliers quoted</p><table style="border-collapse:collapse"><tr>' + head + '</tr>' + body + '</table><p>Only quotations already entered are priced. Figures include estimates: check them against each email before deciding.</p>';
@@ -950,7 +967,7 @@ var Core = (function () {
     return ['Dear Sir / Madam,', '',
       final ? 'This is a final reminder on our request for quotation below. We have not yet received your quotation.' : 'We refer to our request for quotation below. We have not yet received your quotation.', '',
       'Kindly submit your quotation no later than ' + closingForEmail(r.closing) + ' (Malaysia time[UTC +8]). If you are unable to quote, please let us know.', '',
-      'Warmest Regards,', '', settings.signature].join('\n');
+      'Warmest Regards,', '', signatureFor(r, settings)].join('\n');
   }
 
   function queueQuote(store, e) {
@@ -966,8 +983,8 @@ var Core = (function () {
     var result = { checked: 0, replies: 0, followUps: 0, skipped: 0, errors: [] };
     if (!settings) return result;
     var startedAt = Date.now();
-    var account = String(store.mail.status().account || '').toLowerCase();
-    var ours = String(settings.cc || '').split('; ').concat([account]).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+    var account = String(settings.fromEmail || store.mail.status().account || '').toLowerCase();
+    var ours = String(settings.cc || '').split('; ').concat([account, settings.relayEmail || '']).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
     var tasks = {};
     store.all('sourcing').forEach(function (r) { tasks[r.id] = r; });
     var kl = store.kl();
@@ -977,7 +994,7 @@ var Core = (function () {
       if (!notifyTo) return;
       try { store.mail.notify(notifyTo, subject, body); } catch (e) { result.errors.push('notify: ' + (e.message || e)); }
     }
-    var gmailLink = function (threadId) { return GMAIL_BASE + encodeURIComponent(account) + '#all/' + threadId; };
+    var gmailLink = function (threadId, from) { return GMAIL_BASE + encodeURIComponent(from || account) + '#all/' + threadId; };
     var sent = store.all('emails').filter(function (e) { return e.status === 'sent' && e.threadId && tasks[e.taskId]; })
       .sort(function (a, b) { return String(a.checkedAt || '').localeCompare(String(b.checkedAt || '')); });
 
@@ -986,7 +1003,7 @@ var Core = (function () {
       var r = tasks[e.taskId];
       try {
         var lastSeen = Number(e.lastMsgAt) || Date.parse(e.sentAt) || 0;
-        var fresh = store.mail.threadMessages(e.threadId).filter(function (m) {
+        var fresh = store.mail.threadMessages(e.threadId, e.fromAccount).filter(function (m) {
           if (Number(m.time) <= lastSeen) return false;
           var from = String(m.from || '').toLowerCase();
           return !ours.some(function (o) { return from.indexOf(o) >= 0; });
@@ -1006,7 +1023,7 @@ var Core = (function () {
           result.replies++;
           var label = kind === 'bounced' ? 'EMAIL BOUNCED' : (kind === 'quote' ? 'Possible quotation' : 'Supplier reply: decision needed');
           tell('[RFQ] ' + label + ': ' + (e.company || e.email) + ' / ' + (r.rfqNo || r.title),
-            label + '\n\nRFQ: ' + r.title + '\nSupplier: ' + (e.company || '') + ' <' + e.email + '>\nFrom: ' + e.replyFrom + '\nFiles: ' + ((m.attachments || []).join(', ') || 'none') + '\n\n' + e.replySnippet + '\n\nOpen in Gmail (' + account + '): ' + gmailLink(e.threadId) + '\n\nNothing has been replied. Reply only after your decision.');
+            label + '\n\nRFQ: ' + r.title + '\nSupplier: ' + (e.company || '') + ' <' + e.email + '>\nFrom: ' + e.replyFrom + '\nFiles: ' + ((m.attachments || []).join(', ') || 'none') + '\n\n' + e.replySnippet + '\n\nOpen in Gmail (' + (e.fromAccount || account) + '): ' + gmailLink(e.threadId, e.fromAccount) + '\n\nNothing has been replied. Reply only after your decision.');
         });
         e.lastMsgAt = String(lastSeen);
         e.checkedAt = nowIso;
@@ -1048,13 +1065,15 @@ var Core = (function () {
       var regular = isMorning && e.lastFollowUpOn !== kl.date;
       if (!final && !regular) return;
       if (Date.now() - startedAt > MONITOR_BUDGET_MS) { result.skipped++; return; }
-      if (store.mail.status().remaining < MIN_QUOTA_TO_CHASE) {
+      var left = Infinity;
+      try { left = store.mail.status(e.fromAccount).remaining; } catch (err) { result.errors.push(e.email + ': ' + (err.message || err)); return; }
+      if (left < MIN_QUOTA_TO_CHASE) {
         if (!quotaWarned) tell('[RFQ] Follow-ups stopped: Gmail daily limit nearly used', 'Follow-ups for today stopped because few recipients are left. They will continue tomorrow.');
         quotaWarned = true;
         return;
       }
       try {
-        store.mail.replyAll(e.threadId, followUpBody(r, settings, final));
+        store.mail.replyAll(e.threadId, followUpBody(r, settings, final), e.fromAccount);
         if (final) e.finalSentOn = kl.date; else e.lastFollowUpOn = kl.date;
         e.followUps = (Number(e.followUps) || 0) + 1;
         e.updatedAt = store.now();
@@ -1069,6 +1088,6 @@ var Core = (function () {
 
   return {
     SUPER_ADMINS: SUPER_ADMINS, isSuperId: isSuperId, LEVELS: LEVELS, FIELD_TYPES: FIELD_TYPES, COLORS: COLORS,
-    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, rfqItemsText: rfqItemsText, asanaOnlyFiles: asanaOnlyFiles, rfqEmailBody: rfqEmailBody, followUpBody: followUpBody, classifyReply: classifyReply, runMonitor: runMonitor, comparison: comparison, comparisonByItem: comparisonByItem, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
+    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, rfqItemsText: rfqItemsText, asanaOnlyFiles: asanaOnlyFiles, rfqEmailBody: rfqEmailBody, mailAccount: mailAccount, followUpBody: followUpBody, classifyReply: classifyReply, runMonitor: runMonitor, comparison: comparison, comparisonByItem: comparisonByItem, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
   };
 })();

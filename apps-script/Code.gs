@@ -1,9 +1,10 @@
 /**
  * Sourcing Hub — Google Apps Script backend
  *
- * The Apps Script project has TWO files:
+ * The Apps Script project has THREE files:
  *   Code.gs  — this file: Google Sheets storage, Google Drive files, sign-in check
  *   Core.gs  — a copy of assets/core.js: who may see and change what
+ *   Mail.gs  — apps-script/Mail.gs: everything that touches Gmail (also used by Relay.gs)
  *
  * Deploy this from proc.sec1@gmail.com: the RFQ emails will be sent from the deploying account.
  *
@@ -34,10 +35,10 @@ const TABLES = {
   items: ['id', 'sectionId', 'title', 'data', 'editors', 'collaborators', 'files', 'stageChangedAt', 'createdBy', 'createdAt', 'updatedAt'],
   comments: ['id', 'sectionId', 'itemId', 'kind', 'author', 'text', 'createdAt', 'updatedAt'],
   calendar: ['id', 'eventId', 'updatedAt'], // id = item id
-  sourcing: ['id', 'hubSectionId', 'hubSectionName', 'title', 'rfqNo', 'client', 'closing', 'items', 'files', 'hubUpdatedAt', 'status', 'suppliers', 'emailSubject', 'deliveryLocation', 'approvedBy', 'approvedAt', 'createdBy', 'createdAt', 'updatedAt', 'mailFiles', 'digestSentOn'], // id = RFQ Hub item id
+  sourcing: ['id', 'hubSectionId', 'hubSectionName', 'title', 'rfqNo', 'client', 'closing', 'items', 'files', 'hubUpdatedAt', 'status', 'suppliers', 'emailSubject', 'deliveryLocation', 'approvedBy', 'approvedAt', 'createdBy', 'createdAt', 'updatedAt', 'mailFiles', 'digestSentOn', 'fromAccount'], // id = RFQ Hub item id
   quotes: ['id', 'taskId', 'status', 'data', 'source', 'error', 'attempts', 'confirmedBy', 'updatedAt'], // id = email id
-  emails: ['id', 'taskId', 'email', 'company', 'cc', 'subject', 'body', 'draftId', 'messageId', 'threadId', 'status', 'error', 'listApprovedAt', 'createdBy', 'createdAt', 'sentBy', 'sentAt', 'updatedAt', 'replyStatus', 'replyAt', 'replyFrom', 'replySnippet', 'lastMsgAt', 'checkedAt', 'followUps', 'lastFollowUpOn', 'finalSentOn'],
-  settings: ['id', 'fromEmail', 'cc', 'signature', 'updatedBy', 'updatedAt', 'notifyEmail', 'followUpOn', 'rates', 'ratesFetchedOn', 'freightRates', 'volumetricDivisor'], // private to this Sheet: the repository is public
+  emails: ['id', 'taskId', 'email', 'company', 'cc', 'subject', 'body', 'draftId', 'messageId', 'threadId', 'status', 'error', 'listApprovedAt', 'createdBy', 'createdAt', 'sentBy', 'sentAt', 'updatedAt', 'replyStatus', 'replyAt', 'replyFrom', 'replySnippet', 'lastMsgAt', 'checkedAt', 'followUps', 'lastFollowUpOn', 'finalSentOn', 'fromAccount'],
+  settings: ['id', 'fromEmail', 'cc', 'signature', 'updatedBy', 'updatedAt', 'notifyEmail', 'followUpOn', 'rates', 'ratesFetchedOn', 'freightRates', 'volumetricDivisor', 'relayEmail'], // private to this Sheet: the repository is public
 };
 const JSON_COLS = ['fields', 'data', 'editors', 'collaborators', 'files', 'suppliers', 'mailFiles', 'rates'];
 const BOOL_COLS = ['active', 'archived', 'followUpOn'];
@@ -347,53 +348,7 @@ function sheetStore_() {
       }
       delete cache[t];
     },
-    mail: {
-      status: function () { return { account: Session.getEffectiveUser().getEmail(), remaining: MailApp.getRemainingDailyQuota() }; },
-      createDraft: function (m) {
-        const d = GmailApp.createDraft(m.to, m.subject, m.body, mailOptions_(m));
-        return { draftId: d.getId(), messageId: d.getMessage().getId() };
-      },
-      deleteDraft: function (id) {
-        try { GmailApp.getDraft(id).deleteDraft(); } catch (e) { /* already gone from Gmail */ }
-      },
-      sendDraft: function (id) {
-        const msg = GmailApp.getDraft(id).send();
-        return { messageId: msg.getId(), threadId: msg.getThread().getId() };
-      },
-      sendTest: function (m) { GmailApp.sendEmail(m.to, m.subject, m.body, mailOptions_(m)); },
-      threadFiles: function (threadId, ours) {
-        const out = { files: [], skipped: [], text: '' };
-        GmailApp.getThreadById(threadId).getMessages().forEach(function (m) {
-          const from = m.getFrom().toLowerCase();
-          if (ours.some(function (o) { return from.indexOf(o) >= 0; })) return;
-          out.text += '\n\n--- Email from ' + m.getFrom() + ' ---\n' + m.getPlainBody().slice(0, 20000);
-          m.getAttachments().forEach(function (a) {
-            const name = a.getName();
-            const size = a.getSize();
-            if (/\.(png|jpe?g|gif)$/i.test(name) && size < 100000) return; // signature logos
-            if (size > 20 * 1024 * 1024) { out.skipped.push(name); return; }
-            const read = attachmentForReading_(a);
-            if (read) out.files.push(read); else out.skipped.push(name);
-          });
-        });
-        return out;
-      },
-      threadMessages: function (threadId) {
-        return GmailApp.getThreadById(threadId).getMessages().map(function (m) {
-          let auto = '';
-          try { auto = m.getHeader('Auto-Submitted'); } catch (e) { auto = ''; }
-          return {
-            time: m.getDate().getTime(), from: m.getFrom(), subject: m.getSubject(), snippet: m.getPlainBody().slice(0, 500),
-            attachments: m.getAttachments().map(function (a) { return a.getName(); }), isAuto: !!auto && auto.toLowerCase() !== 'no',
-          };
-        });
-      },
-      replyAll: function (threadId, body) {
-        const msgs = GmailApp.getThreadById(threadId).getMessages();
-        msgs[msgs.length - 1].replyAll(body, mailOptions_({ body: body }));
-      },
-      notify: function (to, subject, body, html) { GmailApp.sendEmail(to, subject, body, html ? { htmlBody: html } : {}); },
-    },
+    mail: mailRouter_(),
     kl: function (iso) {
       const d = iso ? new Date(iso) : new Date();
       return { date: Utilities.formatDate(d, 'Asia/Kuala_Lumpur', 'yyyy-MM-dd'), hour: Number(Utilities.formatDate(d, 'Asia/Kuala_Lumpur', 'H')) };
@@ -417,71 +372,6 @@ function sheetStore_() {
   };
 }
 
-/** Plain text and an HTML copy with the same line breaks, so Gmail does not re-wrap item lists. */
-function mailOptions_(m) {
-  const html = String(m.body).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
-  const options = { htmlBody: '<div style="font-family:Arial,sans-serif;font-size:14px">' + html + '</div>' };
-  if (m.cc) options.cc = m.cc.split('; ').join(',');
-  if (m.fileIds && m.fileIds.length) options.attachments = m.fileIds.map(function (id) { return DriveApp.getFileById(id).getBlob(); });
-  return options;
-}
-
-// ---------------------------------------------------------------- quotation files
-
-/** PDFs and pictures go as they are; Excel, Word and CSV are unpacked to text; anything else needs a person. */
-function attachmentForReading_(a) {
-  const name = a.getName();
-  const ext = (/\.([^.]+)$/.exec(name) || [])[1];
-  const type = String(ext || '').toLowerCase();
-  if (type === 'pdf') return { name: name, kind: 'pdf', base64: Utilities.base64Encode(a.getBytes()) };
-  if (type === 'png' || type === 'jpg' || type === 'jpeg' || type === 'gif') return { name: name, kind: 'image', mime: type === 'jpg' ? 'image/jpeg' : 'image/' + type, base64: Utilities.base64Encode(a.getBytes()) };
-  if (type === 'csv' || type === 'txt') return { name: name, kind: 'text', text: a.getDataAsString() };
-  if (type === 'xlsx') return { name: name, kind: 'text', text: xlsxText_(a) };
-  if (type === 'docx') return { name: name, kind: 'text', text: docxText_(a) };
-  return null;
-}
-
-function zipParts_(blob) {
-  const parts = {};
-  Utilities.unzip(blob.copyBlob().setContentType('application/zip')).forEach(function (b) { parts[b.getName()] = b; });
-  return parts;
-}
-
-function xmlDecode_(s) {
-  return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
-}
-
-function docxText_(blob) {
-  const doc = zipParts_(blob)['word/document.xml'];
-  if (!doc) throw new Error('Could not open ' + blob.getName());
-  return xmlDecode_(doc.getDataAsString().replace(/<\/w:p>/g, '\n').replace(/<\/w:tc>/g, ' | ').replace(/<[^>]+>/g, ''));
-}
-
-/** Every sheet as tab-separated rows. */
-function xlsxText_(blob) {
-  const parts = zipParts_(blob);
-  const shared = [];
-  if (parts['xl/sharedStrings.xml']) {
-    (parts['xl/sharedStrings.xml'].getDataAsString().match(/<si>[\s\S]*?<\/si>/g) || []).forEach(function (si) {
-      shared.push(xmlDecode_((si.match(/<t[^>]*>[\s\S]*?<\/t>/g) || []).map(function (t) { return t.replace(/<[^>]+>/g, ''); }).join('')));
-    });
-  }
-  let out = '';
-  Object.keys(parts).filter(function (n) { return /^xl\/worksheets\/sheet\d+\.xml$/.test(n); }).sort().forEach(function (n) {
-    out += '\n--- ' + n.replace(/^.*\//, '') + ' ---\n';
-    (parts[n].getDataAsString().match(/<row[\s\S]*?<\/row>/g) || []).forEach(function (row) {
-      const cells = (row.match(/<c [^>]*?(?:\/>|>[\s\S]*?<\/c>)/g) || []).map(function (c) {
-        const v = (/<v>([\s\S]*?)<\/v>/.exec(c) || [])[1];
-        const inline = (/<t[^>]*>([\s\S]*?)<\/t>/.exec(c) || [])[1];
-        if (/t="s"/.test(c) && v !== undefined) return shared[Number(v)] || '';
-        return xmlDecode_(v !== undefined ? v : (inline || ''));
-      });
-      out += cells.join('\t') + '\n';
-    });
-  });
-  return out;
-}
-
 /** Bank Negara selling rates (RM per 1 unit), refreshed once a day into the settings row. */
 function refreshRates_(store) {
   const s = store.all('settings').filter(function (x) { return x.id === 'email'; })[0];
@@ -496,6 +386,57 @@ function refreshRates_(store) {
   s.rates = rates;
   s.ratesFetchedOn = today;
   store.save('settings', s);
+}
+
+/** Mail calls go to this account's own Gmail, or to the relay project of the second account. */
+function mailRouter_() {
+  const self = Session.getEffectiveUser().getEmail().toLowerCase();
+  const pick = function (account) { return !account || String(account).toLowerCase() === self ? localMail_ : relayMail_(); };
+  return {
+    status: function (a) { return pick(a).status(); },
+    createDraft: function (m, a) { return pick(a).createDraft(m); },
+    deleteDraft: function (id, a) { return pick(a).deleteDraft(id); },
+    sendDraft: function (id, a) { return pick(a).sendDraft(id); },
+    sendTest: function (m, a) { return pick(a).sendTest(m); },
+    threadMessages: function (t, a) { return pick(a).threadMessages(t); },
+    threadFiles: function (t, ours, a) { return pick(a).threadFiles(t, ours); },
+    replyAll: function (t, body, a) { return pick(a).replyAll(t, body); },
+    notify: function (to, subject, body, html) { return localMail_.notify(to, subject, body, html); },
+  };
+}
+
+function relayMail_() {
+  const props = PropertiesService.getScriptProperties();
+  const url = props.getProperty('RELAY_URL');
+  const secret = props.getProperty('RELAY_SECRET');
+  if (!url || !secret) throw Core.fail('SETUP', 'The second sending account is not connected yet.');
+  const call = function (op, args) {
+    const res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'text/plain;charset=utf-8', muteHttpExceptions: true, payload: JSON.stringify({ secret: secret, op: op, args: args }) });
+    let out;
+    try { out = JSON.parse(res.getContentText()); } catch (e) { throw new Error('The second sending account sent an unexpected reply.'); }
+    if (!out.ok) throw new Error(out.error || 'The second sending account refused the request.');
+    return out.data;
+  };
+  // The relay cannot open this account's Drive, so attachments travel with the request.
+  const withFiles = function (m) {
+    const copy = Object.assign({}, m);
+    copy.attachments = (m.fileIds || []).map(function (id) {
+      const blob = DriveApp.getFileById(id).getBlob();
+      return { name: blob.getName(), mime: blob.getContentType(), base64: Utilities.base64Encode(blob.getBytes()) };
+    });
+    delete copy.fileIds;
+    return copy;
+  };
+  return {
+    status: function () { return call('status', []); },
+    createDraft: function (m) { return call('createDraft', [withFiles(m)]); },
+    deleteDraft: function (id) { return call('deleteDraft', [id]); },
+    sendDraft: function (id) { return call('sendDraft', [id]); },
+    sendTest: function (m) { return call('sendTest', [withFiles(m)]); },
+    threadMessages: function (t) { return call('threadMessages', [t]); },
+    threadFiles: function (t, ours) { return call('threadFiles', [t, ours]); },
+    replyAll: function (t, body) { return call('replyAll', [t, body]); },
+  };
 }
 
 function sheet_(name) {

@@ -32,13 +32,23 @@
 
 **Gmail 限制：** Google 对普通 Gmail 账号的脚本发信限制是每天 100 个收件人，CC 可能也计入。页面会显示当天剩余额度；超过时 Google 会拒发，系统会停下并显示错误。
 
+**第二个发信账号：** 每个任务可以选从哪个账号发（任务页 **Send from**）。系统不会自动切换。同一任务里已发出的邮件，后续监控和跟进都留在原账号。
+
+设定步骤（Sam 做，约 5 分钟）：
+1. 用第二个账号打开 <https://script.google.com/> → **New project**，命名 `Sourcing Hub Relay`，贴入 `apps-script/Mail.gs`（文件名 `Mail`）和 `apps-script/Relay.gs`（文件名 `Relay`）
+2. 函数选 **setupRelay** → **Run** → 授权，Execution log 会印出 `RELAY_SECRET`
+3. **Deploy → New deployment** → Web app，Execute as **Me**，Who has access **Anyone**，复制 `/exec` 网址
+4. 在主项目 **Project Settings → Script Properties** 加 `RELAY_URL` 和 `RELAY_SECRET`。不要把 Secret 贴进代码或聊天
+5. 主项目要有 `Code`、`Core`、`Mail` 三个文件，更新后部署 **New version**
+6. 在 **Email settings** 填 **Second sending account**
+
 **权限跟 Supplier Register 走：** Viewer 只能看，Editor 可以修改，Manager 和 Super admin 可以批准。要读取 RFQ Hub，使用者也要有 RFQ Hub 的账号和权限。
 
 ## 上线步骤（Sam 做，约 5 分钟）
 
 1. 用 **proc.sec1@gmail.com** 打开 <https://script.google.com/> → **New project**，项目名改成 `Sourcing Hub API`
 2. 把 `apps-script/Code.gs` 的全部内容贴进 `Code.gs`
-3. 左侧 Files 旁边按 **+ → Script**，命名为 `Core`，把 `assets/core.js` 的全部内容贴进去
+3. 左侧 Files 旁边按 **+ → Script**，命名为 `Core`，把 `assets/core.js` 的全部内容贴进去；再建一个 `Mail`，贴入 `apps-script/Mail.gs`
 4. ⚙️ **Project Settings** → Time zone 选 `(GMT+08:00) Kuala Lumpur`
 5. 回到 `Code.gs`，函数选单选 **setup** → **Run** → 授权（未验证的应用 → Advanced → Go to Sourcing Hub API）
 6. **Deploy → New deployment** → Web app，Execute as **Me**，Who has access **Anyone** → 复制 **Web app URL**（结尾 `/exec`）交给小助

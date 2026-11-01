@@ -1620,7 +1620,7 @@
     const held = srcState.drafts[id];
     // Unedited drafts follow what is saved, so changes made elsewhere show after a refresh.
     if (!held || (!held.edited && held.at !== r.updatedAt)) {
-      srcState.drafts[id] = { at: r.updatedAt, edited: false, suppliers: (r.suppliers || []).map((x) => ({ ...x })), emailSubject: r.emailSubject || '', deliveryLocation: r.deliveryLocation || '' };
+      srcState.drafts[id] = { at: r.updatedAt, edited: false, suppliers: (r.suppliers || []).map((x) => ({ ...x })), emailSubject: r.emailSubject || '', deliveryLocation: r.deliveryLocation || '', fromAccount: r.fromAccount || '' };
     }
     return srcState.drafts[id];
   }
@@ -1719,6 +1719,7 @@
         <div class="group"><h2>Email details</h2><div class="src-fields">
           <label class="fld"><span>Email title</span><input name="emailSubject" value="${esc(d.emailSubject)}"${a.edit ? '' : ' disabled'}></label>
           <label class="fld"><span>Delivery location</span><input name="deliveryLocation" value="${esc(d.deliveryLocation)}"${a.edit ? '' : ' disabled'}></label>
+          ${S.settings && S.settings.relayEmail ? `<label class="fld"><span>Send from</span><select name="fromAccount"${a.edit ? '' : ' disabled'}>${[S.settings.fromEmail, S.settings.relayEmail].map((x) => `<option value="${x === S.settings.fromEmail ? '' : esc(x)}"${Core.mailAccount(d, S.settings) === x ? ' selected' : ''}>${esc(x)}</option>`).join('')}</select></label>` : ''}
         </div></div>
         <div class="group"><h2>Suppliers (${d.suppliers.length})</h2>
           <div class="tablewrap"><table class="t src-sup"><thead><tr><th>Company</th><th>Email</th><th>Type</th><th>Country</th><th>Source link</th><th>Note</th><th></th></tr></thead>
@@ -1732,7 +1733,7 @@
           ${r.status === 'approved' ? `<p class="muted">Approved by ${esc(userName(r.approvedBy))} on ${esc(fmtDT(r.approvedAt))}. Saving a change returns the list to draft.</p>` : ''}
         </div>
       </form>
-      <details class="group"><summary>Email preview</summary><p class="muted"><b>${esc(d.emailSubject || '[email title]')}</b></p><pre class="src-pre">${esc(Core.rfqEmailBody(Object.assign({}, r, { deliveryLocation: d.deliveryLocation }), S.settings))}</pre></details>
+      <details class="group"><summary>Email preview</summary><p class="muted"><b>${esc(d.emailSubject || '[email title]')}</b></p><pre class="src-pre">${esc(Core.rfqEmailBody(Object.assign({}, r, { deliveryLocation: d.deliveryLocation, fromAccount: d.fromAccount }), S.settings))}</pre></details>
       ${emailPanel(r, a, d)}
       ${comparisonPanel(r, a)}`;
   }
@@ -1747,6 +1748,7 @@
     d.edited = true;
     d.emailSubject = form.elements.emailSubject.value;
     d.deliveryLocation = form.elements.deliveryLocation.value;
+    if (form.elements.fromAccount) d.fromAccount = form.elements.fromAccount.value;
     d.suppliers = [...form.querySelectorAll('tr[data-sup]')].map((tr) => {
       const v = (n) => tr.querySelector(`[name="${n}"]`).value;
       return { company: v('company'), email: v('email'), type: v('type'), country: v('country'), source: v('source'), note: v('note') };
@@ -1762,7 +1764,7 @@
     const id = $('#srcForm').dataset.id;
     const d = srcSync();
     try {
-      const res = await API.call(action, { itemId: id, suppliers: d.suppliers, emailSubject: d.emailSubject, deliveryLocation: d.deliveryLocation });
+      const res = await API.call(action, { itemId: id, suppliers: d.suppliers, emailSubject: d.emailSubject, deliveryLocation: d.deliveryLocation, fromAccount: d.fromAccount });
       srcKeep(res.sourcing);
       delete srcState.drafts[id];
       toast(action === 'sourcing.approve' ? 'Supplier list approved' : 'Draft saved');
@@ -1812,8 +1814,8 @@
 
   const srcMails = (id) => (S.emails || []).filter((e) => e.taskId === id);
   const mailStale = (r, e) => r.status !== 'approved' || e.listApprovedAt !== r.approvedAt || e.subject !== r.emailSubject
-    || e.cc !== (S.settings || {}).cc || e.body !== Core.rfqEmailBody(r, S.settings);
-  const gmailUrl = (hash) => `https://mail.google.com/mail/u/?authuser=${encodeURIComponent((S.settings || {}).fromEmail || '')}#${hash}`;
+    || Core.mailAccount(e, S.settings) !== Core.mailAccount(r, S.settings) || e.cc !== (S.settings || {}).cc || e.body !== Core.rfqEmailBody(r, S.settings);
+  const gmailUrl = (hash, account) => `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(account || (S.settings || {}).fromEmail || '')}#${hash}`;
 
   function replyChip(e) {
     if (e.status !== 'sent') return '';
@@ -1843,10 +1845,10 @@
     return stale ? '<span class="chip warn">Out of date</span>' : '<span class="chip info">Draft</span>';
   }
 
-  function mailQuotaLine(unsent) {
-    const st = srcState.mailStatus;
+  function mailQuotaLine(unsent, from) {
+    const st = srcState.mailStatus && srcState.mailStatus.for === from ? srcState.mailStatus : null;
     const per = 1 + String((S.settings || {}).cc || '').split('; ').filter(Boolean).length;
-    if (!st) { if (!srcState.mailLoading) setTimeout(srcMailLoad); return ''; }
+    if (!st) { if (!srcState.mailLoading) setTimeout(() => srcMailLoad(from)); return ''; }
     if (st.error) return `<p class="muted">Could not read the Gmail limit: ${esc(st.error)}</p>`;
     const need = unsent * per;
     const short = need > st.remaining;
@@ -1862,7 +1864,7 @@
     const anyStale = unsentList.some((e) => mailStale(r, e));
     const asana = Core.asanaOnlyFiles(r.items).filter((n) => !(r.mailFiles || []).some((f) => f.name === n));
     const dr = srcDraft(r.id);
-    const unsaved = dr.edited || (dr.emailSubject || '') !== (r.emailSubject || '') || (dr.deliveryLocation || '') !== (r.deliveryLocation || '');
+    const unsaved = dr.edited || (dr.emailSubject || '') !== (r.emailSubject || '') || (dr.deliveryLocation || '') !== (r.deliveryLocation || '') || (dr.fromAccount || '') !== (r.fromAccount || '');
     const missing = [];
     if (r.status !== 'approved') missing.push('approve the supplier list');
     if (unsaved) missing.push('save your changes');
@@ -1871,9 +1873,9 @@
     const busy = srcState.mailBusy;
     const canDraft = a.approve && !missing.length && !busy && (!asana.length || srcState.skipAsana === r.id);
     const rows = mails.map((e) => `<tr><td class="title">${esc(e.company || '—')}</td><td class="nw">${esc(e.email)}</td><td class="nw">${mailChip(e, mailStale(r, e))}</td><td class="nw" title="${esc(e.replySnippet || '')}">${replyChip(e)}</td>
-      <td class="nw">${e.status === 'sent' ? `<a href="${esc(gmailUrl('all/' + e.threadId))}" target="_blank" rel="noopener">Open email</a>` : `<a href="${esc(gmailUrl('drafts?compose=' + e.messageId))}" target="_blank" rel="noopener">Open draft</a>`}</td></tr>`).join('');
+      <td class="nw">${e.status === 'sent' ? `<a href="${esc(gmailUrl('all/' + e.threadId, e.fromAccount))}" target="_blank" rel="noopener">Open email</a>` : `<a href="${esc(gmailUrl('drafts?compose=' + e.messageId, e.fromAccount))}" target="_blank" rel="noopener">Open draft</a>`}</td></tr>`).join('');
     return `<div class="group"><h2>RFQ emails</h2>
-      <p class="muted">From ${esc(set.fromEmail)} · CC ${esc(set.cc || 'none')}</p>
+      <p class="muted">From ${esc(Core.mailAccount(r, set))} · CC ${esc(set.cc || 'none')}</p>
       ${asana.length ? `<div class="banner"><b>Only in Asana</b><span>Upload to the RFQ Hub task, then create the drafts: ${esc(asana.join(', '))}</span></div>
         <label class="fld chk src-skip"><input type="checkbox" id="srcSkipAsana" ${srcState.skipAsana === r.id ? 'checked' : ''}><span>Create the drafts without these files</span></label>` : ''}
       ${missing.length ? `<p class="muted">Before making drafts: ${esc(missing.join(', '))}.</p>` : ''}
@@ -1887,13 +1889,13 @@
         <button type="button" class="btn" data-act="src-prepare" data-id="${esc(r.id)}" ${canDraft ? '' : 'disabled'}>${unsentList.length ? 'Create drafts again' : 'Create drafts'}</button>
         <span class="sp"></span>
         ${freshUnsent.length && !anyStale ? `<button type="button" class="btn ${srcState.armedSend === r.id ? 'danger armed' : 'primary'}" data-act="src-send" data-id="${esc(r.id)}" ${busy || unsaved ? 'disabled' : ''}>${srcState.armedSend === r.id ? `Click again to send ${freshUnsent.length} now` : `Approve and send ${freshUnsent.length} emails`}</button>` : ''}
-      </div>${freshUnsent.length ? mailQuotaLine(freshUnsent.length) : ''}` : ''}
+      </div>${freshUnsent.length ? mailQuotaLine(freshUnsent.length, Core.mailAccount(r, set)) : ''}` : ''}
     </div>`;
   }
 
-  async function srcMailLoad() {
+  async function srcMailLoad(account) {
     srcState.mailLoading = true;
-    try { srcState.mailStatus = await API.call('mail.status'); } catch (e) { srcState.mailStatus = { error: e.message }; }
+    try { srcState.mailStatus = Object.assign(await API.call('mail.status', { account }), { for: account }); } catch (e) { srcState.mailStatus = { error: e.message, for: account }; }
     srcState.mailLoading = false;
     if (route().view === 'sourcing' || route().view === 'mailsettings') render();
   }
@@ -1962,7 +1964,7 @@
     try {
       setBusy('Sending a test email to you…');
       const res = await API.call('sourcing.test', { itemId: id });
-      srcState.mailStatus = res.status;
+      srcState.mailStatus = Object.assign(res.status, { for: res.status.account });
       toast('Test email sent to ' + res.to + ' only');
     } catch (e) { handleError(e); }
     setBusy('');
@@ -2003,7 +2005,7 @@
       <div class="tablewrap"><table class="t src-cmp"><thead><tr><th>Supplier</th><th>State</th><th class="r">Items</th><th class="r">Freight</th><th>Freight basis</th><th class="r">Gross kg</th><th class="r">Vol kg</th><th>Dimensions</th><th class="r">SST 10%</th><th class="r">Total</th><th>Lead time</th><th>Valid until</th><th>Email</th></tr></thead>
         <tbody>${rows.map((x) => `<tr><td class="title">${esc(x.company || x.email)}${(x.warnings || []).map((w) => `<div class="src-warn">${esc(w)}</div>`).join('')}${x.notes ? `<div class="muted">${esc(x.notes)}</div>` : ''}</td><td class="nw">${stateOf(x)}</td>
           <td class="r">${rmText(x.itemRm)}</td><td class="r">${rmText(x.freightRm)}</td><td>${esc(x.freightSource || '—')}</td><td class="r">${rmText(x.grossKg)}</td><td class="r">${rmText(x.volumetricKg)}</td><td class="nw">${esc(x.dimensions || '—')}</td><td class="r">${rmText(x.sstRm)}</td><td class="r"><b>${rmText(x.landedRm)}</b>${x.lines.length && !x.complete ? '<div class="src-warn">Incomplete</div>' : ''}</td><td>${esc(x.leadTime || '—')}</td><td>${esc(x.validUntil || '—')}</td>
-          <td class="nw"><a href="${esc(gmailUrl('all/' + x.threadId))}" target="_blank" rel="noopener">Open</a></td></tr>`).join('')}</tbody></table></div>
+          <td class="nw"><a href="${esc(gmailUrl('all/' + x.threadId, x.fromAccount))}" target="_blank" rel="noopener">Open</a></td></tr>`).join('')}</tbody></table></div>
       ${byItem.length ? `<h2 class="src-sub">By RFQ item</h2><div class="tablewrap"><table class="t src-cmp"><thead><tr><th>RFQ item</th><th>Supplier</th><th>Offered</th><th class="r">Qty</th><th class="r">Unit RM</th><th class="r">Line RM</th><th>Lead time</th></tr></thead>
         <tbody>${byItem.map((g) => g.offers.map((o, i) => `<tr><td class="nw">${i === 0 ? esc(g.item) : ''}</td><td>${esc(o.company)}</td><td>${esc(o.offeredMake || o.description)}</td><td class="r">${esc(o.qty === null ? '—' : o.qty)} ${esc(o.uom)}</td><td class="r">${rmText(o.unitRm)}</td><td class="r">${rmText(o.lineRm)}</td><td>${esc(o.leadTime || '—')}</td></tr>`).join('')).join('')}</tbody></table></div>` : ''}
       <p class="muted">Check entered figures against the email. SST is 10% of items plus freight on imported goods. Exchange rates: Bank Negara selling rate${used.length ? ` (${used.map((c) => `${esc(c)} ${esc(Number(rates[c].rate).toFixed(4))} on ${esc(rates[c].date)}`).join(', ')})` : ''}.</p>
@@ -2067,13 +2069,15 @@
   function viewMailSettings() {
     if (!S.me.isSuper) return '<div class="empty-state"><b>Super admin only</b></div>';
     const set = S.settings || {};
-    const st = srcState.mailStatus;
-    if (!st && !srcState.mailLoading) setTimeout(srcMailLoad);
+    const check = srcState.settingsCheck || set.fromEmail || '';
+    const st = srcState.mailStatus && srcState.mailStatus.for === check ? srcState.mailStatus : null;
+    if (!st && !srcState.mailLoading && check) setTimeout(() => srcMailLoad(check));
     return `<div class="head"><div><h1>Email settings</h1><div class="sub">Used for every RFQ email. Saved in the private Google Sheet.</div></div></div>
       <form id="mailSettings" class="src-settings" novalidate>
         <label class="fld"><span>Send from (must match the account the backend runs on)</span><input name="fromEmail" type="email" value="${esc(set.fromEmail || '')}"></label>
         <label class="fld"><span>CC on every RFQ email</span><textarea name="cc" rows="3">${esc(set.cc || '')}</textarea></label>
         <label class="fld"><span>Signature (printed under “Warmest Regards,”)</span><textarea name="signature" rows="9">${esc(set.signature || '')}</textarea></label>
+        <label class="fld"><span>Second sending account (optional)</span><input name="relayEmail" type="email" value="${esc(set.relayEmail || '')}"></label>
         <label class="fld"><span>Send supplier reply alerts to</span><input name="notifyEmail" type="email" value="${esc(set.notifyEmail || '')}"></label>
         <label class="fld chk"><input type="checkbox" name="followUpOn" ${set.followUpOn ? 'checked' : ''}><span>Send follow-ups automatically: 9am daily, plus a final reminder at 1pm on the closing day, only to suppliers with no reply</span></label>
         <label class="fld"><span>Freight rates, one per line: origin country, delivery place, RM per chargeable kg</span><textarea name="freightRates" rows="5" placeholder="United Kingdom, Labuan, 45">${esc(set.freightRates || '')}</textarea></label>
@@ -2081,12 +2085,12 @@
         <details><summary>Follow-up wording</summary><pre class="src-pre">${esc(Core.followUpBody({ closing: '2026-11-05T23:00' }, { signature: set.signature || '[signature]' }, false))}</pre><pre class="src-pre">${esc(Core.followUpBody({ closing: '2026-11-05T23:00' }, { signature: set.signature || '[signature]' }, true))}</pre></details>
         <div class="form-actions"><button type="submit" class="btn primary">Save</button></div>
       </form>
-      <p class="muted">${st ? (st.error ? esc(st.error) : `This platform sends as ${esc(st.account)}. Google allows ${esc(String(st.remaining))} more recipients today.`) : 'Checking the Gmail connection…'}</p>`;
+      <p class="muted">${st ? (st.error ? esc(st.error) : `${esc(st.account)} is connected. Google allows ${esc(String(st.remaining))} more recipients today.`) : 'Checking the Gmail connection…'}${set.relayEmail ? ` <button type="button" class="linkbtn" data-act="mail-check" data-account="${esc(check === set.relayEmail ? set.fromEmail : set.relayEmail)}">Check ${esc(check === set.relayEmail ? set.fromEmail : set.relayEmail)}</button>` : ''}</p>`;
   }
 
   async function saveMailSettings(form) {
     try {
-      const res = await API.call('settings.save', { fromEmail: form.elements.fromEmail.value, cc: form.elements.cc.value, signature: form.elements.signature.value, notifyEmail: form.elements.notifyEmail.value, followUpOn: form.elements.followUpOn.checked, freightRates: form.elements.freightRates.value, volumetricDivisor: form.elements.volumetricDivisor.value });
+      const res = await API.call('settings.save', { fromEmail: form.elements.fromEmail.value, cc: form.elements.cc.value, signature: form.elements.signature.value, relayEmail: form.elements.relayEmail.value, notifyEmail: form.elements.notifyEmail.value, followUpOn: form.elements.followUpOn.checked, freightRates: form.elements.freightRates.value, volumetricDivisor: form.elements.volumetricDivisor.value });
       S.settings = res.settings;
       toast('Email settings saved');
       render();
@@ -2952,6 +2956,7 @@
       case 'src-prepare': srcPrepare(d.id); break;
       case 'src-send': srcSend(d.id); break;
       case 'src-test': srcTest(d.id); break;
+      case 'mail-check': srcState.settingsCheck = d.account; render(); break;
       case 'src-check': srcCheckReplies(); break;
       case 'quote-save': quoteSave(d.id, false); break;
       case 'quote-confirm': quoteSave(d.id, true); break;
