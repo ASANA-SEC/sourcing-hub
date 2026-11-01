@@ -111,8 +111,8 @@
       sup(3, 'Supplier D HVAC (example)', 'mechanical', 'Mr Kumar', '', 'Agent', 'Malaysia', 'evaluation', '', 'AHU, chillers', null),
       sup(4, 'Supplier F Trading (example)', 'valves', 'Mr Lim', 'lim@supplier-f.example.com', 'Supplier', 'Malaysia', 'blacklisted', 'c', 'Late deliveries 2025', null),
     ];
-    return { users, sections, access, items, comments: [], sourcing: [], emails: [],
-      settings: [{ id: 'email', fromEmail: DEMO_FROM, cc: 'colleague.one@example.com; colleague.two@example.com', signature: 'Example Buyer\n\nEXAMPLE COMPANY SDN BHD\nKuala Lumpur, Malaysia', updatedBy: SAM, updatedAt: stamp(-1), notifyEmail: SAM, followUpOn: false }] };
+    return { users, sections, access, items, comments: [], sourcing: [], emails: [], quotes: [],
+      settings: [{ id: 'email', fromEmail: DEMO_FROM, cc: 'colleague.one@example.com; colleague.two@example.com', signature: 'Example Buyer\n\nEXAMPLE COMPANY SDN BHD\nKuala Lumpur, Malaysia', updatedBy: SAM, updatedAt: stamp(-1), notifyEmail: SAM, followUpOn: false, volumetricDivisor: 5000, freightRates: 'Singapore, Labuan, 12', rates: { USD: { rate: 4.056, date: day(-1) }, SGD: { rate: 3.1, date: day(-1) } } }] };
   }
 
   /** What RFQ Hub would answer in demo mode: one RFQ section with a Pending column. */
@@ -142,7 +142,7 @@
       if (db) return db;
       try { db = JSON.parse(localStorage.getItem(DEMO_KEY) || 'null'); } catch (e) { db = null; }
       if (!db || !Array.isArray(db.sections)) db = seed();
-      ['users', 'sections', 'access', 'items', 'comments', 'sourcing', 'emails', 'settings'].forEach((t) => { if (!Array.isArray(db[t])) db[t] = []; });
+      ['users', 'sections', 'access', 'items', 'comments', 'sourcing', 'emails', 'settings', 'quotes'].forEach((t) => { if (!Array.isArray(db[t])) db[t] = []; });
       persist();
       return db;
     }
@@ -172,6 +172,11 @@
       uid: () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
       saveFile: (item, name) => { if (item.sectionId === 'sourcing') return { id: 'demo_' + name, name, mimeType: 'application/pdf', size: 1 }; throw noDrive(); },
       readFile: () => { throw noDrive(); },
+      // Example answer per supplier: set sourcinghub_demo_ai to test the comparison.
+      ai: {
+        ready: () => !localStorage.getItem('sourcinghub_demo_nokey'),
+        extract() { const list = demoJson('sourcinghub_demo_ai'); const next = (list.queue || []).shift(); localStorage.setItem('sourcinghub_demo_ai', JSON.stringify(list)); if (!next) throw new Error('No demo answer'); return next; },
+      },
       // Nothing leaves the browser in demo mode.
       mail: {
         quota: 100,
@@ -181,6 +186,7 @@
         sendDraft(id) { if (localStorage.getItem('sourcinghub_demo_fail')) throw new Error('Service invoked too many times for one day: email.'); this.quota -= 3; return { messageId: 'demo_' + Date.now(), threadId: 'demo_thread_' + id + '_' + Math.random().toString(36).slice(2, 8) }; },
         sendTest() { this.quota -= 1; },
         threadMessages(threadId) { return demoJson('sourcinghub_demo_replies')[threadId] || []; },
+        threadFiles() { return { files: [{ name: 'Quote.pdf', kind: 'pdf' }], skipped: [], text: 'Please see attached.' }; },
         replyAll(threadId, body) { demoLog('sourcinghub_demo_outbox', { threadId, body }); this.quota -= 2; },
         notify(to, subject) { demoLog('sourcinghub_demo_alerts', { to, subject }); this.quota -= 1; },
       },

@@ -291,6 +291,7 @@
       S.access = res.access || [];
       S.sourcing = res.sourcing || [];
       S.emails = res.emails || [];
+      S.quotes = res.quotes || [];
       S.settings = res.settings || null;
       if (!S.loaded) { S.loaded = true; renderShell(); }
       render();
@@ -1732,7 +1733,8 @@
         </div>
       </form>
       <details class="group"><summary>Email preview</summary><p class="muted"><b>${esc(d.emailSubject || '[email title]')}</b></p><pre class="src-pre">${esc(Core.rfqEmailBody(Object.assign({}, r, { deliveryLocation: d.deliveryLocation }), S.settings))}</pre></details>
-      ${emailPanel(r, a, d)}`;
+      ${emailPanel(r, a, d)}
+      ${comparisonPanel(r, a)}`;
   }
 
   // ---- actions
@@ -1966,6 +1968,85 @@
     setBusy('');
   }
 
+  // ---- quotation comparison
+
+  const rmText = (v) => (v === null || v === undefined || v === '' ? '—' : nf2.format(Number(v)));
+
+  function quoteEditor(row, a) {
+    const q = (S.quotes || []).find((x) => x.id === row.emailId) || { data: {} };
+    const d = q.data || {};
+    const fld = (name, label, type) => `<label class="fld"><span>${label}</span><input name="${name}" ${type === 'number' ? 'type="number" step="any"' : ''} value="${esc(d[name] === null || d[name] === undefined ? '' : d[name])}" ${a.edit ? '' : 'disabled'}></label>`;
+    const line = (it, i) => `<tr data-line="${i}">${[['rfqItemNo', 'number'], ['description'], ['offeredMake'], ['qty', 'number'], ['uom'], ['unitPrice', 'number'], ['lineTotal', 'number']].map(([n, t]) => `<td><input name="${n}" aria-label="${n}" ${t ? 'type="number" step="any"' : ''} value="${esc(it[n] === null || it[n] === undefined ? '' : it[n])}" ${a.edit ? '' : 'disabled'}></td>`).join('')}</tr>`;
+    const lines = (d.items || []).concat(a.edit ? [{}] : []);
+    return `<details class="src-quote" data-email="${esc(row.emailId)}"><summary>${esc(row.company || row.email)}${q.source ? ` · ${esc(q.source)}` : ''}</summary>
+      <div class="src-fields">${fld('quoteRef', 'Quote ref')}${fld('currency', 'Currency (USD, MYR…)')}${fld('validUntil', 'Valid until')}${fld('leadTime', 'Lead time')}${fld('originCountry', 'Ships from')}${fld('netWeightKg', 'Net kg', 'number')}${fld('grossWeightKg', 'Gross kg', 'number')}${fld('packages', 'Packages', 'number')}${fld('lengthCm', 'Length cm', 'number')}${fld('widthCm', 'Width cm', 'number')}${fld('heightCm', 'Height cm', 'number')}${fld('freightCost', 'Supplier freight', 'number')}${fld('freightCurrency', 'Freight currency')}${fld('incoterm', 'Incoterm')}
+        <label class="fld"><span>Imported (10% SST)</span><select name="imported" ${a.edit ? '' : 'disabled'}><option value="">Decide from origin</option><option value="yes"${d.imported === true ? ' selected' : ''}>Yes</option><option value="no"${d.imported === false ? ' selected' : ''}>No</option></select></label></div>
+      <label class="fld src-note"><span>Notes</span><textarea name="notes" rows="2" ${a.edit ? '' : 'disabled'}>${esc(d.notes || '')}</textarea></label>
+      <div class="tablewrap"><table class="t src-sup"><thead><tr><th>RFQ item</th><th>Description</th><th>Offered make</th><th>Qty</th><th>UOM</th><th>Unit price</th><th>Line total</th></tr></thead><tbody>${lines.map(line).join('')}</tbody></table></div>
+      ${a.edit ? `<div class="form-actions src-actions">${a.approve ? `<button type="button" class="btn" data-act="quote-extract" data-id="${esc(row.emailId)}">Read again with AI</button>` : ''}<span class="sp"></span><button type="button" class="btn" data-act="quote-save" data-id="${esc(row.emailId)}">Save</button><button type="button" class="btn primary" data-act="quote-confirm" data-id="${esc(row.emailId)}">Save and mark checked</button></div>` : ''}
+    </details>`;
+  }
+
+  function comparisonPanel(r, a) {
+    if (!srcMails(r.id).some((e) => e.status === 'sent')) return '';
+    const rows = Core.comparison(r, S.emails || [], S.quotes || [], S.settings || {});
+    const byItem = Core.comparisonByItem(rows);
+    const stateOf = (x) => {
+      if (x.confirmed) return '<span class="chip ok">Checked</span>';
+      if (x.quoteStatus === 'pending') return '<span class="chip info">Waiting to be read</span>';
+      if (x.quoteStatus === 'failed') return `<span class="chip crit" title="${esc(x.error)}">Could not read</span>`;
+      if (x.lines.length) return '<span class="chip warn">AI read: check</span>';
+      return `<span class="muted">${x.replyStatus === 'bounced' ? 'Bounced' : x.replyStatus === 'query' ? 'Reply: decide' : 'No quotation'}</span>`;
+    };
+    const rates = (S.settings || {}).rates || {};
+    const used = [...new Set(rows.map((x) => x.currency).filter((c) => c && c !== 'MYR'))].filter((c) => rates[c]);
+    return `<div class="group"><h2>Quotation comparison (RM)</h2>
+      <div class="tablewrap"><table class="t src-cmp"><thead><tr><th>Supplier</th><th>State</th><th class="r">Items</th><th class="r">Freight</th><th>Freight basis</th><th class="r">Gross kg</th><th class="r">Vol kg</th><th>Dimensions</th><th class="r">SST 10%</th><th class="r">Total</th><th>Lead time</th><th>Valid until</th><th>Email</th></tr></thead>
+        <tbody>${rows.map((x) => `<tr><td class="title">${esc(x.company || x.email)}${(x.warnings || []).map((w) => `<div class="src-warn">${esc(w)}</div>`).join('')}${x.notes ? `<div class="muted">${esc(x.notes)}</div>` : ''}</td><td class="nw">${stateOf(x)}</td>
+          <td class="r">${rmText(x.itemRm)}</td><td class="r">${rmText(x.freightRm)}</td><td>${esc(x.freightSource || '—')}</td><td class="r">${rmText(x.grossKg)}</td><td class="r">${rmText(x.volumetricKg)}</td><td class="nw">${esc(x.dimensions || '—')}</td><td class="r">${rmText(x.sstRm)}</td><td class="r"><b>${rmText(x.landedRm)}</b>${x.lines.length && !x.complete ? '<div class="src-warn">Incomplete</div>' : ''}</td><td>${esc(x.leadTime || '—')}</td><td>${esc(x.validUntil || '—')}</td>
+          <td class="nw"><a href="${esc(gmailUrl('all/' + x.threadId))}" target="_blank" rel="noopener">Open</a></td></tr>`).join('')}</tbody></table></div>
+      ${byItem.length ? `<h2 class="src-sub">By RFQ item</h2><div class="tablewrap"><table class="t src-cmp"><thead><tr><th>RFQ item</th><th>Supplier</th><th>Offered</th><th class="r">Qty</th><th class="r">Unit RM</th><th class="r">Line RM</th><th>Lead time</th></tr></thead>
+        <tbody>${byItem.map((g) => g.offers.map((o, i) => `<tr><td class="nw">${i === 0 ? esc(g.item) : ''}</td><td>${esc(o.company)}</td><td>${esc(o.offeredMake || o.description)}</td><td class="r">${esc(o.qty === null ? '—' : o.qty)} ${esc(o.uom)}</td><td class="r">${rmText(o.unitRm)}</td><td class="r">${rmText(o.lineRm)}</td><td>${esc(o.leadTime || '—')}</td></tr>`).join('')).join('')}</tbody></table></div>` : ''}
+      <p class="muted">AI read figures must be checked against the email. SST is 10% of items plus freight on imported goods. Exchange rates: Bank Negara selling rate${used.length ? ` (${used.map((c) => `${esc(c)} ${esc(Number(rates[c].rate).toFixed(4))} on ${esc(rates[c].date)}`).join(', ')})` : ''}.</p>
+      <h2 class="src-sub">Quotation details</h2>${rows.map((x) => quoteEditor(x, a)).join('')}
+    </div>`;
+  }
+
+  function quoteFromForm(id) {
+    const box = document.querySelector(`.src-quote[data-email="${id}"]`);
+    const data = {};
+    const val2 = (n) => box.querySelector(`[name="${n}"]`).value.trim();
+    ['quoteRef', 'currency', 'validUntil', 'leadTime', 'originCountry', 'freightCurrency', 'incoterm', 'notes'].forEach((n) => { data[n] = val2(n) || null; });
+    ['netWeightKg', 'grossWeightKg', 'packages', 'lengthCm', 'widthCm', 'heightCm', 'freightCost'].forEach((n) => { data[n] = val2(n) === '' ? null : Number(val2(n)); });
+    const imp = val2('imported');
+    if (imp) data.imported = imp === 'yes';
+    data.items = [...box.querySelectorAll('tr[data-line]')].map((tr) => {
+      const v = (n) => tr.querySelector(`[name="${n}"]`).value.trim();
+      const n = (k) => (v(k) === '' ? null : Number(v(k)));
+      return { rfqItemNo: n('rfqItemNo'), description: v('description') || null, offeredMake: v('offeredMake') || null, qty: n('qty'), uom: v('uom') || null, unitPrice: n('unitPrice'), lineTotal: n('lineTotal') };
+    }).filter((l) => l.description || l.unitPrice !== null || l.lineTotal !== null);
+    return data;
+  }
+
+  async function quoteSave(id, confirmed) {
+    try {
+      const res = await API.call('quote.save', { emailId: id, data: quoteFromForm(id), confirmed });
+      S.quotes = (S.quotes || []).filter((q) => q.id !== id).concat([res.quote]);
+      toast(confirmed ? 'Saved and marked checked' : 'Saved');
+      render();
+    } catch (e) { handleError(e); }
+  }
+
+  async function quoteExtract(id) {
+    try {
+      setBusy('Reading the quotation with AI…');
+      S.quotes = (await API.call('quote.extract', { emailId: id })).quotes;
+      const q = S.quotes.find((x) => x.id === id);
+      toast(q.status === 'failed' ? q.error : 'Quotation read. Check the figures.', q.status === 'failed');
+    } catch (e) { handleError(e); }
+    setBusy('');
+  }
+
   // ---- email settings (kept in the private Sheet, not in the public code)
 
   function viewMailSettings() {
@@ -1980,6 +2061,8 @@
         <label class="fld"><span>Signature (printed under “Warmest Regards,”)</span><textarea name="signature" rows="9">${esc(set.signature || '')}</textarea></label>
         <label class="fld"><span>Send supplier reply alerts to</span><input name="notifyEmail" type="email" value="${esc(set.notifyEmail || '')}"></label>
         <label class="fld chk"><input type="checkbox" name="followUpOn" ${set.followUpOn ? 'checked' : ''}><span>Send follow-ups automatically: 9am daily, plus a final reminder at 1pm on the closing day, only to suppliers with no reply</span></label>
+        <label class="fld"><span>Freight rates, one per line: origin country, delivery place, RM per chargeable kg</span><textarea name="freightRates" rows="5" placeholder="United Kingdom, Labuan, 45">${esc(set.freightRates || '')}</textarea></label>
+        <label class="fld"><span>Volumetric divisor (cm³ per kg)</span><input name="volumetricDivisor" type="number" value="${esc(set.volumetricDivisor || 5000)}"></label>
         <details><summary>Follow-up wording</summary><pre class="src-pre">${esc(Core.followUpBody({ closing: '2026-11-05T23:00' }, { signature: set.signature || '[signature]' }, false))}</pre><pre class="src-pre">${esc(Core.followUpBody({ closing: '2026-11-05T23:00' }, { signature: set.signature || '[signature]' }, true))}</pre></details>
         <div class="form-actions"><button type="submit" class="btn primary">Save</button></div>
       </form>
@@ -1988,7 +2071,7 @@
 
   async function saveMailSettings(form) {
     try {
-      const res = await API.call('settings.save', { fromEmail: form.elements.fromEmail.value, cc: form.elements.cc.value, signature: form.elements.signature.value, notifyEmail: form.elements.notifyEmail.value, followUpOn: form.elements.followUpOn.checked });
+      const res = await API.call('settings.save', { fromEmail: form.elements.fromEmail.value, cc: form.elements.cc.value, signature: form.elements.signature.value, notifyEmail: form.elements.notifyEmail.value, followUpOn: form.elements.followUpOn.checked, freightRates: form.elements.freightRates.value, volumetricDivisor: form.elements.volumetricDivisor.value });
       S.settings = res.settings;
       toast('Email settings saved');
       render();
@@ -2855,6 +2938,9 @@
       case 'src-send': srcSend(d.id); break;
       case 'src-test': srcTest(d.id); break;
       case 'src-check': srcCheckReplies(); break;
+      case 'quote-save': quoteSave(d.id, false); break;
+      case 'quote-confirm': quoteSave(d.id, true); break;
+      case 'quote-extract': quoteExtract(d.id); break;
       case 'src-import': srcImport(d.id, d.section); break;
       case 'src-refresh': srcRefresh(d.id); break;
       case 'src-remove': srcRemove(d.id); break;

@@ -378,6 +378,7 @@ var Core = (function () {
           comments: store.all('comments').filter(function (c) { return vis[c.itemId]; }),
           sourcing: sourcingAccess(ctx, sections).view ? store.all('sourcing') : [],
           emails: sourcingAccess(ctx, sections).view ? store.all('emails') : [],
+          quotes: sourcingAccess(ctx, sections).view ? store.all('quotes') : [],
           settings: sourcingAccess(ctx, sections).view ? (store.all('settings').filter(function (x) { return x.id === 'email'; })[0] || null) : null,
           // Own rows, plus everyone's rows on sections this person manages (managers see who is on their team).
           access: me.isSuper ? access : access.filter(function (a) {
@@ -472,9 +473,32 @@ var Core = (function () {
         var hadSet = store.all('settings').filter(function (x) { return x.id === 'email'; })[0];
         var notify = String(p.notifyEmail || '').trim().toLowerCase();
         if (notify && !EMAIL_RE.test(notify)) throw fail('BAD_REQUEST', 'Check the address for supplier reply alerts.');
-        var setRec = { id: 'email', fromEmail: from, cc: cc.join('; '), signature: String(p.signature || '').trim().slice(0, 2000), updatedBy: me.id, updatedAt: now, notifyEmail: notify, followUpOn: p.followUpOn === true };
+        var setRec = { id: 'email', fromEmail: from, cc: cc.join('; '), signature: String(p.signature || '').trim().slice(0, 2000), updatedBy: me.id, updatedAt: now, notifyEmail: notify, followUpOn: p.followUpOn === true,
+          rates: (hadSet && hadSet.rates) || {}, freightRates: String(p.freightRates || '').slice(0, 5000), volumetricDivisor: num(p.volumetricDivisor) || DEFAULT_VOLUMETRIC_DIVISOR };
         if (hadSet) store.save('settings', setRec); else store.insert('settings', setRec);
         return { settings: setRec };
+      }
+
+      case 'quote.extract': {
+        if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can do this.');
+        var emX = store.all('emails').filter(function (x) { return x.id === p.emailId && x.status === 'sent'; })[0];
+        if (!emX) throw fail('NOT_FOUND', 'This email was not sent.');
+        if (!store.ai.ready()) throw fail('SETUP', 'Add the Anthropic API key in Apps Script first.');
+        var hadX = store.all('quotes').filter(function (q) { return q.id === emX.id; })[0];
+        var qX = { id: emX.id, taskId: emX.taskId, status: 'pending', data: (hadX && hadX.data) || {}, source: '', error: '', attempts: 0, confirmedBy: '', updatedAt: now };
+        if (hadX) store.save('quotes', qX); else store.insert('quotes', qX);
+        extractPending(store, null, emX.id);
+        return { quotes: store.all('quotes') };
+      }
+
+      case 'quote.save': {
+        if (!sourcingAccess(ctx, sections).edit) throw fail('FORBIDDEN', 'You can view RFQ Sourcing but not change it.');
+        var emQ = store.all('emails').filter(function (x) { return x.id === p.emailId; })[0];
+        if (!emQ) throw fail('NOT_FOUND', 'This email no longer exists.');
+        var hadQ = store.all('quotes').filter(function (q) { return q.id === emQ.id; })[0];
+        var qQ = { id: emQ.id, taskId: emQ.taskId, status: p.confirmed ? 'confirmed' : 'review', data: p.data || {}, source: hadQ ? hadQ.source : 'Entered by hand', error: '', attempts: 0, confirmedBy: p.confirmed ? me.id : '', updatedAt: now };
+        if (hadQ) store.save('quotes', qQ); else store.insert('quotes', qQ);
+        return { quote: qQ };
       }
 
       case 'monitor.run': {
@@ -783,6 +807,162 @@ var Core = (function () {
     }
   }
 
+  // ------------------------------------------------------------ comparing quotations
+
+  var SST_RATE = 0.10;
+  var DEFAULT_VOLUMETRIC_DIVISOR = 5000;
+  var MAX_EXTRACT_ATTEMPTS = 3;
+  var DUTY_FREE_RE = /labuan|langkawi|tioman/i;
+
+  function num(v) { var n = Number(v); return v === null || v === '' || v === undefined || isNaN(n) ? null : n; }
+  function round2(n) { return n === null ? null : Math.round(n * 100) / 100; }
+
+  /** "United Kingdom, Labuan, 45" per line: RM per chargeable kg from an origin country to a delivery place. */
+  function freightRate(settings, origin, location) {
+    var hit = null;
+    String((settings && settings.freightRates) || '').split(/\r?\n/).forEach(function (line) {
+      var p = line.split(',').map(function (x) { return x.trim(); });
+      if (p.length < 3 || !origin || !location) return;
+      if (p[0].toLowerCase() === String(origin).toLowerCase() && String(location).toLowerCase().indexOf(p[1].toLowerCase()) >= 0) hit = num(p[2]);
+    });
+    return hit;
+  }
+  function toRm(amount, currency, settings) {
+    if (amount === null) return null;
+    var c = String(currency || '').toUpperCase().replace('RM', 'MYR');
+    if (c === 'MYR') return amount;
+    var r = ((settings && settings.rates) || {})[c];
+    return r ? amount * Number(r.rate) : null;
+  }
+
+  /** One row per supplier emailed on a task. Pure arithmetic: every figure can be checked by hand. */
+  function comparison(r, emails, quotes, settings) {
+    var divisor = num(settings && settings.volumetricDivisor) || DEFAULT_VOLUMETRIC_DIVISOR;
+    var rows = emails.filter(function (e) { return e.taskId === r.id && e.status === 'sent'; }).map(function (e) {
+      var q = quotes.filter(function (x) { return x.id === e.id; })[0];
+      var row = { emailId: e.id, company: e.company, email: e.email, threadId: e.threadId, replyStatus: e.replyStatus || '', quoteStatus: q ? q.status : '', error: q ? q.error : '', confirmed: !!(q && q.status === 'confirmed'), warnings: [], lines: [] };
+      if (!q || !q.data || !arr(q.data.items).length) return row;
+      var d = q.data;
+      var cur = String(d.currency || '').toUpperCase();
+      row.quoteRef = d.quoteRef || '';
+      row.currency = cur;
+      row.leadTime = d.leadTime || '';
+      row.validUntil = d.validUntil || '';
+      row.notes = d.notes || '';
+      var total = 0;
+      var missingPrice = false;
+      row.lines = arr(d.items).map(function (it) {
+        var qty = num(it.qty);
+        var unit = num(it.unitPrice);
+        var line = num(it.lineTotal);
+        if (line === null && qty !== null && unit !== null) line = qty * unit;
+        if (line === null) missingPrice = true; else total += line;
+        if (unit === null && line !== null && qty) unit = line / qty;
+        return { rfqItemNo: num(it.rfqItemNo), description: it.description || '', offeredMake: it.offeredMake || '', qty: qty, uom: it.uom || '', unitRm: round2(toRm(unit, cur, settings)), lineRm: round2(toRm(line, cur, settings)) };
+      });
+      var answered = {};
+      row.lines.forEach(function (ln) { if (ln.rfqItemNo !== null) answered[ln.rfqItemNo] = true; });
+      var asked = (rfqItemsText(r.items).match(/^\s*\d+\s*[.)]/gm) || []).length;
+      var covered = Object.keys(answered).length;
+      row.partial = asked > 0 && covered < asked;
+      if (row.partial) row.warnings.push('Quotes ' + covered + ' of ' + asked + ' RFQ items');
+      if (missingPrice) row.warnings.push('A line has no price');
+      row.itemRm = round2(toRm(total, cur, settings));
+      if (row.itemRm === null) row.warnings.push('No exchange rate for ' + (cur || 'unknown currency'));
+
+      var sup = arr(r.suppliers).filter(function (x) { return x.email === e.email; })[0] || {};
+      var origin = d.originCountry || sup.country || '';
+      row.grossKg = num(d.grossWeightKg);
+      row.netKg = num(d.netWeightKg);
+      var l = num(d.lengthCm), w = num(d.widthCm), h = num(d.heightCm), pk = num(d.packages) || 1;
+      row.dimensions = l && w && h ? pk + ' x ' + l + ' x ' + w + ' x ' + h + ' cm' : '';
+      row.volumetricKg = l && w && h ? round2(l * w * h * pk / divisor) : null;
+      var chargeable = Math.max(row.grossKg || 0, row.volumetricKg || 0) || null;
+      var supplierFreight = toRm(num(d.freightCost), d.freightCurrency || cur, settings);
+      var rate = freightRate(settings, origin, r.deliveryLocation);
+      if (supplierFreight !== null) { row.freightRm = round2(supplierFreight); row.freightSource = 'Supplier'; }
+      else if (rate !== null && chargeable) { row.freightRm = round2(rate * chargeable); row.freightSource = 'Estimate: RM ' + rate + '/kg x ' + chargeable + ' kg'; }
+      else { row.freightRm = null; row.freightSource = 'Missing'; row.warnings.push(chargeable ? 'No freight rate for ' + (origin || 'unknown origin') + ' to ' + r.deliveryLocation : 'No freight price and no weight'); }
+
+      var imported = d.imported === true || d.imported === false ? d.imported : (origin ? !/malaysia/i.test(origin) : null);
+      row.imported = imported;
+      if (imported === null) row.warnings.push('Unknown whether imported, so SST is not counted');
+      row.sstRm = imported && row.itemRm !== null ? round2((row.itemRm + (row.freightRm || 0)) * SST_RATE) : (imported === false ? 0 : null);
+      if (imported && DUTY_FREE_RE.test(String(r.deliveryLocation))) row.warnings.push('Duty-free area: confirm SST with finance');
+      row.landedRm = row.itemRm === null ? null : round2(row.itemRm + (row.freightRm || 0) + (row.sstRm || 0));
+      return row;
+    });
+    // Totals that leave out freight or RFQ items look cheaper than they are, so complete quotes rank first.
+    function tier(x) {
+      if (x.landedRm === undefined || x.landedRm === null) return 2;
+      return x.partial || x.freightRm === null || x.imported === null ? 1 : 0;
+    }
+    rows.forEach(function (x) { x.complete = tier(x) === 0; });
+    rows.sort(function (a, b) {
+      return tier(a) - tier(b) || (a.landedRm === undefined || a.landedRm === null ? Infinity : a.landedRm) - (b.landedRm === undefined || b.landedRm === null ? Infinity : b.landedRm);
+    });
+    return rows;
+  }
+
+  /** Quotation lines answering each RFQ item, so partial quotes can be compared. */
+  function comparisonByItem(rows) {
+    var byNo = {};
+    rows.forEach(function (row) {
+      row.lines.forEach(function (ln) {
+        var k = ln.rfqItemNo === null ? 'Not matched' : String(ln.rfqItemNo);
+        (byNo[k] = byNo[k] || []).push({ company: row.company, description: ln.description, offeredMake: ln.offeredMake, qty: ln.qty, uom: ln.uom, unitRm: ln.unitRm, lineRm: ln.lineRm, leadTime: row.leadTime });
+      });
+    });
+    return Object.keys(byNo).sort(function (a, b) { return (Number(a) || 1e9) - (Number(b) || 1e9); }).map(function (k) {
+      return { item: k, offers: byNo[k].sort(function (a, b) { return (a.unitRm === null ? Infinity : a.unitRm) - (b.unitRm === null ? Infinity : b.unitRm); }) };
+    });
+  }
+
+  function comparisonEmail(r, rows, account) {
+    function h(v) { return String(v === null || v === undefined || v === '' ? '—' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+    var td = 'style="border:1px solid #ccc;padding:5px;font-size:12px"';
+    var link = function (t) { return 'https://mail.google.com/mail/u/?authuser=' + encodeURIComponent(account) + '#all/' + t; };
+    var quoted = rows.filter(function (x) { return x.lines.length; }).length;
+    var body = rows.map(function (x) {
+      return '<tr>' + [x.company, x.lines.length ? x.quoteRef : (x.replyStatus === 'bounced' ? 'Bounced' : (x.replyStatus === 'query' ? 'Reply: decide' : 'No quotation')), x.itemRm, x.freightRm, x.freightSource, x.grossKg, x.volumetricKg, x.dimensions, x.sstRm, x.landedRm, x.leadTime, x.warnings ? x.warnings.join('; ') : ''].map(function (v) { return '<td ' + td + '>' + h(v) + '</td>'; }).join('') + '<td ' + td + '><a href="' + link(x.threadId) + '">Open</a></td></tr>';
+    }).join('');
+    var head = ['Supplier', 'Quote', 'Items RM', 'Freight RM', 'Freight basis', 'Gross kg', 'Vol kg', 'Dimensions', 'SST RM', 'Total RM', 'Lead time', 'Check', 'Email'].map(function (v) { return '<th ' + td + '>' + v + '</th>'; }).join('');
+    return '<p><b>' + h(r.title) + '</b><br>Closing ' + h(closingForEmail(r.closing)) + ' · Delivery ' + h(r.deliveryLocation) + ' · ' + quoted + ' of ' + rows.length + ' suppliers quoted</p><table style="border-collapse:collapse"><tr>' + head + '</tr>' + body + '</table><p>Figures were read from quotations by AI and include estimates. Check them against each email before deciding.</p>';
+  }
+
+  /** Read pending quotations with Claude. Slow, so it runs outside the lock; `guard` wraps only the writes. */
+  function extractPending(store, guard, onlyId) {
+    guard = guard || function (fn) { return fn(); };
+    var done = { extracted: 0, failed: 0, waiting: 0 };
+    var startedAt = Date.now();
+    var settings = store.all('settings').filter(function (x) { return x.id === 'email'; })[0] || {};
+    var account = String(store.mail.status().account || '').toLowerCase();
+    var ours = String(settings.cc || '').split('; ').concat([account]).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+    store.all('quotes').filter(function (q) { return onlyId ? q.id === onlyId : q.status === 'pending' && (Number(q.attempts) || 0) < MAX_EXTRACT_ATTEMPTS; }).forEach(function (q) {
+      if (Date.now() - startedAt > MONITOR_BUDGET_MS) return;
+      if (!store.ai.ready()) { done.waiting++; return; }
+      var e = store.all('emails').filter(function (x) { return x.id === q.id; })[0];
+      var r = e && store.all('sourcing').filter(function (x) { return x.id === e.taskId; })[0];
+      if (!r) return;
+      q.attempts = (Number(q.attempts) || 0) + 1;
+      try {
+        var got = store.mail.threadFiles(e.threadId, ours);
+        q.data = store.ai.extract({ rfq: rfqItemsText(r.items), location: r.deliveryLocation, emailText: got.text, files: got.files });
+        q.source = got.files.map(function (f) { return f.name; }).concat(got.skipped).join(', ').slice(0, 500);
+        q.status = got.skipped.length ? 'review' : 'extracted';
+        q.error = got.skipped.length ? 'Could not read: ' + got.skipped.join(', ') : '';
+        done.extracted++;
+      } catch (err) {
+        q.error = String(err.message || err).slice(0, 300);
+        q.status = q.attempts >= MAX_EXTRACT_ATTEMPTS || onlyId ? 'failed' : 'pending';
+        done.failed++;
+      }
+      q.updatedAt = store.now();
+      guard(function () { store.save('quotes', q); });
+    });
+    return done;
+  }
+
   // ------------------------------------------------------------ watching RFQ replies
 
   var QUOTE_FILE_RE = /\.(pdf|xlsx?|docx?|csv|zip)$/i;
@@ -807,6 +987,13 @@ var Core = (function () {
       final ? 'This is a final reminder on our request for quotation below. We have not yet received your quotation.' : 'We refer to our request for quotation below. We have not yet received your quotation.', '',
       'Kindly submit your quotation no later than ' + closingForEmail(r.closing) + ' (Malaysia time[UTC +8]). If you are unable to quote, please let us know.', '',
       'Warmest Regards,', '', settings.signature].join('\n');
+  }
+
+  function queueQuote(store, e) {
+    var had = store.all('quotes').filter(function (q) { return q.id === e.id; })[0];
+    if (had && had.status === 'confirmed') return;
+    var q = { id: e.id, taskId: e.taskId, status: 'pending', data: (had && had.data) || {}, source: '', error: '', attempts: 0, confirmedBy: '', updatedAt: store.now() };
+    if (had) store.save('quotes', q); else store.insert('quotes', q);
   }
 
   /** One pass: read every sent thread, tell Sam about new replies, then send any follow-up that is due. */
@@ -848,6 +1035,7 @@ var Core = (function () {
             return;
           }
           if (e.replyStatus !== 'quote' || kind === 'quote') e.replyStatus = kind;
+          if (kind === 'quote') queueQuote(store, e);
           e.replyAt = new Date(Number(m.time)).toISOString();
           e.replyFrom = String(m.from || '').slice(0, 200);
           e.replySnippet = String(m.snippet || '').slice(0, 500);
@@ -865,6 +1053,20 @@ var Core = (function () {
         result.errors.push(e.email + ': ' + (err.message || err));
       }
     });
+
+    if (kl.hour >= 9) {
+      var tomorrow = store.kl(new Date(Date.parse(kl.date + 'T12:00:00+08:00') + 864e5).toISOString()).date;
+      store.all('sourcing').forEach(function (r) {
+        if (String(r.closing).slice(0, 10) !== tomorrow || r.digestSentOn === kl.date || !notifyTo) return;
+        var rows = comparison(r, store.all('emails'), store.all('quotes'), settings);
+        if (!rows.length) return;
+        try {
+          store.mail.notify(notifyTo, '[RFQ] Quotation comparison, closes tomorrow: ' + (r.rfqNo || r.title), 'Open this email in a client that shows HTML.', comparisonEmail(r, rows, account));
+          r.digestSentOn = kl.date;
+          store.save('sourcing', r);
+        } catch (err) { result.errors.push('comparison: ' + (err.message || err)); }
+      });
+    }
 
     if (!settings.followUpOn) return result;
     var isMorning = kl.hour === 9;
@@ -903,6 +1105,6 @@ var Core = (function () {
 
   return {
     SUPER_ADMINS: SUPER_ADMINS, isSuperId: isSuperId, LEVELS: LEVELS, FIELD_TYPES: FIELD_TYPES, COLORS: COLORS,
-    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, rfqItemsText: rfqItemsText, asanaOnlyFiles: asanaOnlyFiles, rfqEmailBody: rfqEmailBody, followUpBody: followUpBody, classifyReply: classifyReply, runMonitor: runMonitor, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
+    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, rfqItemsText: rfqItemsText, asanaOnlyFiles: asanaOnlyFiles, rfqEmailBody: rfqEmailBody, followUpBody: followUpBody, classifyReply: classifyReply, runMonitor: runMonitor, extractPending: extractPending, comparison: comparison, comparisonByItem: comparisonByItem, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
   };
 })();

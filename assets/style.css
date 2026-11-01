@@ -593,3 +593,8 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13px; }
 .src-warn { color: var(--warn); }
 .src-skip { padding-top: 6px; }
 .src-settings { display: grid; gap: 12px; max-width: 620px; margin: 14px 0; }
+.src-sub { margin-top: 14px !important; }
+.src-cmp td { vertical-align: top; }
+.src-quote { margin: 8px 0; padding: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); }
+.src-quote summary { cursor: pointer; font-weight: 500; margin-bottom: 8px; }
+.src-note { margin: 10px 0; }
