@@ -1983,7 +1983,7 @@
         <label class="fld"><span>Imported (10% SST)</span><select name="imported" ${a.edit ? '' : 'disabled'}><option value="">Decide from origin</option><option value="yes"${d.imported === true ? ' selected' : ''}>Yes</option><option value="no"${d.imported === false ? ' selected' : ''}>No</option></select></label></div>
       <label class="fld src-note"><span>Notes</span><textarea name="notes" rows="2" ${a.edit ? '' : 'disabled'}>${esc(d.notes || '')}</textarea></label>
       <div class="tablewrap"><table class="t src-sup"><thead><tr><th>RFQ item</th><th>Description</th><th>Offered make</th><th>Qty</th><th>UOM</th><th>Unit price</th><th>Line total</th></tr></thead><tbody>${lines.map(line).join('')}</tbody></table></div>
-      ${a.edit ? `<div class="form-actions src-actions">${a.approve ? `<button type="button" class="btn" data-act="quote-extract" data-id="${esc(row.emailId)}">Read again with AI</button>` : ''}<span class="sp"></span><button type="button" class="btn" data-act="quote-save" data-id="${esc(row.emailId)}">Save</button><button type="button" class="btn primary" data-act="quote-confirm" data-id="${esc(row.emailId)}">Save and mark checked</button></div>` : ''}
+      ${a.edit ? `<div class="form-actions src-actions"><button type="button" class="btn" data-act="quote-download" data-id="${esc(row.emailId)}">Download emails and files</button><span class="sp"></span><button type="button" class="btn" data-act="quote-save" data-id="${esc(row.emailId)}">Save</button><button type="button" class="btn primary" data-act="quote-confirm" data-id="${esc(row.emailId)}">Save and mark checked</button></div>` : ''}
     </details>`;
   }
 
@@ -1993,9 +1993,8 @@
     const byItem = Core.comparisonByItem(rows);
     const stateOf = (x) => {
       if (x.confirmed) return '<span class="chip ok">Checked</span>';
-      if (x.quoteStatus === 'pending') return '<span class="chip info">Waiting to be read</span>';
-      if (x.quoteStatus === 'failed') return `<span class="chip crit" title="${esc(x.error)}">Could not read</span>`;
-      if (x.lines.length) return '<span class="chip warn">AI read: check</span>';
+      if (x.quoteStatus === 'pending') return '<span class="chip info">Quotation received: enter it</span>';
+      if (x.lines.length) return '<span class="chip warn">Entered: check</span>';
       return `<span class="muted">${x.replyStatus === 'bounced' ? 'Bounced' : x.replyStatus === 'query' ? 'Reply: decide' : 'No quotation'}</span>`;
     };
     const rates = (S.settings || {}).rates || {};
@@ -2007,7 +2006,7 @@
           <td class="nw"><a href="${esc(gmailUrl('all/' + x.threadId))}" target="_blank" rel="noopener">Open</a></td></tr>`).join('')}</tbody></table></div>
       ${byItem.length ? `<h2 class="src-sub">By RFQ item</h2><div class="tablewrap"><table class="t src-cmp"><thead><tr><th>RFQ item</th><th>Supplier</th><th>Offered</th><th class="r">Qty</th><th class="r">Unit RM</th><th class="r">Line RM</th><th>Lead time</th></tr></thead>
         <tbody>${byItem.map((g) => g.offers.map((o, i) => `<tr><td class="nw">${i === 0 ? esc(g.item) : ''}</td><td>${esc(o.company)}</td><td>${esc(o.offeredMake || o.description)}</td><td class="r">${esc(o.qty === null ? '—' : o.qty)} ${esc(o.uom)}</td><td class="r">${rmText(o.unitRm)}</td><td class="r">${rmText(o.lineRm)}</td><td>${esc(o.leadTime || '—')}</td></tr>`).join('')).join('')}</tbody></table></div>` : ''}
-      <p class="muted">AI read figures must be checked against the email. SST is 10% of items plus freight on imported goods. Exchange rates: Bank Negara selling rate${used.length ? ` (${used.map((c) => `${esc(c)} ${esc(Number(rates[c].rate).toFixed(4))} on ${esc(rates[c].date)}`).join(', ')})` : ''}.</p>
+      <p class="muted">Check entered figures against the email. SST is 10% of items plus freight on imported goods. Exchange rates: Bank Negara selling rate${used.length ? ` (${used.map((c) => `${esc(c)} ${esc(Number(rates[c].rate).toFixed(4))} on ${esc(rates[c].date)}`).join(', ')})` : ''}.</p>
       <h2 class="src-sub">Quotation details</h2>${rows.map((x) => quoteEditor(x, a)).join('')}
     </div>`;
   }
@@ -2037,13 +2036,29 @@
     } catch (e) { handleError(e); }
   }
 
-  async function quoteExtract(id) {
+  function saveAs(name, blob) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  }
+
+  /** Download one supplier's emails and files so they can be read and entered here. */
+  async function quoteDownload(id) {
+    const e = (S.emails || []).find((x) => x.id === id);
+    const tag = String((e && e.company) || 'supplier').replace(/[^\w-]+/g, '_').slice(0, 40);
     try {
-      setBusy('Reading the quotation with AI…');
-      S.quotes = (await API.call('quote.extract', { emailId: id })).quotes;
-      const q = S.quotes.find((x) => x.id === id);
-      toast(q.status === 'failed' ? q.error : 'Quotation read. Check the figures.', q.status === 'failed');
-    } catch (e) { handleError(e); }
+      setBusy('Fetching the quotation files…');
+      const res = await API.call('quote.files', { emailId: id });
+      saveAs(`${tag}_emails.txt`, new Blob([res.text || ''], { type: 'text/plain' }));
+      (res.files || []).forEach((f) => {
+        if (f.kind === 'text') { saveAs(`${tag}_${f.name}.txt`, new Blob([f.text || ''], { type: 'text/plain' })); return; }
+        const bytes = Uint8Array.from(atob(f.base64), (c) => c.charCodeAt(0));
+        saveAs(`${tag}_${f.name}`, new Blob([bytes], { type: f.mime || 'application/pdf' }));
+      });
+      toast(`${(res.files || []).length + 1} files downloaded${(res.skipped || []).length ? '. Open in Gmail: ' + res.skipped.join(', ') : ''}`, !!(res.skipped || []).length);
+    } catch (err) { handleError(err); }
     setBusy('');
   }
 
@@ -2940,7 +2955,7 @@
       case 'src-check': srcCheckReplies(); break;
       case 'quote-save': quoteSave(d.id, false); break;
       case 'quote-confirm': quoteSave(d.id, true); break;
-      case 'quote-extract': quoteExtract(d.id); break;
+      case 'quote-download': quoteDownload(d.id); break;
       case 'src-import': srcImport(d.id, d.section); break;
       case 'src-refresh': srcRefresh(d.id); break;
       case 'src-remove': srcRemove(d.id); break;

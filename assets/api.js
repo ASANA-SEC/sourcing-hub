@@ -172,11 +172,6 @@
       uid: () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
       saveFile: (item, name) => { if (item.sectionId === 'sourcing') return { id: 'demo_' + name, name, mimeType: 'application/pdf', size: 1 }; throw noDrive(); },
       readFile: () => { throw noDrive(); },
-      // Example answer per supplier: set sourcinghub_demo_ai to test the comparison.
-      ai: {
-        ready: () => !localStorage.getItem('sourcinghub_demo_nokey'),
-        extract() { const list = demoJson('sourcinghub_demo_ai'); const next = (list.queue || []).shift(); localStorage.setItem('sourcinghub_demo_ai', JSON.stringify(list)); if (!next) throw new Error('No demo answer'); return next; },
-      },
       // Nothing leaves the browser in demo mode.
       mail: {
         quota: 100,
@@ -186,7 +181,7 @@
         sendDraft(id) { if (localStorage.getItem('sourcinghub_demo_fail')) throw new Error('Service invoked too many times for one day: email.'); this.quota -= 3; return { messageId: 'demo_' + Date.now(), threadId: 'demo_thread_' + id + '_' + Math.random().toString(36).slice(2, 8) }; },
         sendTest() { this.quota -= 1; },
         threadMessages(threadId) { return demoJson('sourcinghub_demo_replies')[threadId] || []; },
-        threadFiles() { return { files: [{ name: 'Quote.pdf', kind: 'pdf' }], skipped: [], text: 'Please see attached.' }; },
+        threadFiles() { return { files: [{ name: 'Quote.pdf', kind: 'pdf', base64: 'JVBERi0=' }, { name: 'Prices.xlsx', kind: 'text', text: 'Item\tPrice' }], skipped: ['Old.xls'], text: 'Please see attached.' }; },
         replyAll(threadId, body) { demoLog('sourcinghub_demo_outbox', { threadId, body }); this.quota -= 2; },
         notify(to, subject) { demoLog('sourcinghub_demo_alerts', { to, subject }); this.quota -= 1; },
       },

@@ -479,16 +479,14 @@ var Core = (function () {
         return { settings: setRec };
       }
 
-      case 'quote.extract': {
-        if (!sourcingAccess(ctx, sections).approve) throw fail('FORBIDDEN', 'Only a Supplier Register manager or super admin can do this.');
-        var emX = store.all('emails').filter(function (x) { return x.id === p.emailId && x.status === 'sent'; })[0];
-        if (!emX) throw fail('NOT_FOUND', 'This email was not sent.');
-        if (!store.ai.ready()) throw fail('SETUP', 'Add the Anthropic API key in Apps Script first.');
-        var hadX = store.all('quotes').filter(function (q) { return q.id === emX.id; })[0];
-        var qX = { id: emX.id, taskId: emX.taskId, status: 'pending', data: (hadX && hadX.data) || {}, source: '', error: '', attempts: 0, confirmedBy: '', updatedAt: now };
-        if (hadX) store.save('quotes', qX); else store.insert('quotes', qX);
-        extractPending(store, null, emX.id);
-        return { quotes: store.all('quotes') };
+      case 'quote.files': {
+        // The supplier's emails and files, for a person (or Claude in the desktop app) to read.
+        if (!sourcingAccess(ctx, sections).edit) throw fail('FORBIDDEN', 'You can view RFQ Sourcing but not change it.');
+        var emF = store.all('emails').filter(function (x) { return x.id === p.emailId && x.status === 'sent'; })[0];
+        if (!emF) throw fail('NOT_FOUND', 'This email was not sent.');
+        var setF = store.all('settings').filter(function (x) { return x.id === 'email'; })[0] || {};
+        var oursF = String(setF.cc || '').split('; ').concat([String(store.mail.status().account || '')]).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+        return store.mail.threadFiles(emF.threadId, oursF);
       }
 
       case 'quote.save': {
@@ -496,7 +494,7 @@ var Core = (function () {
         var emQ = store.all('emails').filter(function (x) { return x.id === p.emailId; })[0];
         if (!emQ) throw fail('NOT_FOUND', 'This email no longer exists.');
         var hadQ = store.all('quotes').filter(function (q) { return q.id === emQ.id; })[0];
-        var qQ = { id: emQ.id, taskId: emQ.taskId, status: p.confirmed ? 'confirmed' : 'review', data: p.data || {}, source: hadQ ? hadQ.source : 'Entered by hand', error: '', attempts: 0, confirmedBy: p.confirmed ? me.id : '', updatedAt: now };
+        var qQ = { id: emQ.id, taskId: emQ.taskId, status: p.confirmed ? 'confirmed' : 'review', data: p.data || {}, source: hadQ ? hadQ.source : '', error: '', confirmedBy: p.confirmed ? me.id : '', updatedAt: now };
         if (hadQ) store.save('quotes', qQ); else store.insert('quotes', qQ);
         return { quote: qQ };
       }
@@ -811,7 +809,6 @@ var Core = (function () {
 
   var SST_RATE = 0.10;
   var DEFAULT_VOLUMETRIC_DIVISOR = 5000;
-  var MAX_EXTRACT_ATTEMPTS = 3;
   var DUTY_FREE_RE = /labuan|langkawi|tioman/i;
 
   function num(v) { var n = Number(v); return v === null || v === '' || v === undefined || isNaN(n) ? null : n; }
@@ -927,40 +924,7 @@ var Core = (function () {
       return '<tr>' + [x.company, x.lines.length ? x.quoteRef : (x.replyStatus === 'bounced' ? 'Bounced' : (x.replyStatus === 'query' ? 'Reply: decide' : 'No quotation')), x.itemRm, x.freightRm, x.freightSource, x.grossKg, x.volumetricKg, x.dimensions, x.sstRm, x.landedRm, x.leadTime, x.warnings ? x.warnings.join('; ') : ''].map(function (v) { return '<td ' + td + '>' + h(v) + '</td>'; }).join('') + '<td ' + td + '><a href="' + link(x.threadId) + '">Open</a></td></tr>';
     }).join('');
     var head = ['Supplier', 'Quote', 'Items RM', 'Freight RM', 'Freight basis', 'Gross kg', 'Vol kg', 'Dimensions', 'SST RM', 'Total RM', 'Lead time', 'Check', 'Email'].map(function (v) { return '<th ' + td + '>' + v + '</th>'; }).join('');
-    return '<p><b>' + h(r.title) + '</b><br>Closing ' + h(closingForEmail(r.closing)) + ' · Delivery ' + h(r.deliveryLocation) + ' · ' + quoted + ' of ' + rows.length + ' suppliers quoted</p><table style="border-collapse:collapse"><tr>' + head + '</tr>' + body + '</table><p>Figures were read from quotations by AI and include estimates. Check them against each email before deciding.</p>';
-  }
-
-  /** Read pending quotations with Claude. Slow, so it runs outside the lock; `guard` wraps only the writes. */
-  function extractPending(store, guard, onlyId) {
-    guard = guard || function (fn) { return fn(); };
-    var done = { extracted: 0, failed: 0, waiting: 0 };
-    var startedAt = Date.now();
-    var settings = store.all('settings').filter(function (x) { return x.id === 'email'; })[0] || {};
-    var account = String(store.mail.status().account || '').toLowerCase();
-    var ours = String(settings.cc || '').split('; ').concat([account]).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
-    store.all('quotes').filter(function (q) { return onlyId ? q.id === onlyId : q.status === 'pending' && (Number(q.attempts) || 0) < MAX_EXTRACT_ATTEMPTS; }).forEach(function (q) {
-      if (Date.now() - startedAt > MONITOR_BUDGET_MS) return;
-      if (!store.ai.ready()) { done.waiting++; return; }
-      var e = store.all('emails').filter(function (x) { return x.id === q.id; })[0];
-      var r = e && store.all('sourcing').filter(function (x) { return x.id === e.taskId; })[0];
-      if (!r) return;
-      q.attempts = (Number(q.attempts) || 0) + 1;
-      try {
-        var got = store.mail.threadFiles(e.threadId, ours);
-        q.data = store.ai.extract({ rfq: rfqItemsText(r.items), location: r.deliveryLocation, emailText: got.text, files: got.files });
-        q.source = got.files.map(function (f) { return f.name; }).concat(got.skipped).join(', ').slice(0, 500);
-        q.status = got.skipped.length ? 'review' : 'extracted';
-        q.error = got.skipped.length ? 'Could not read: ' + got.skipped.join(', ') : '';
-        done.extracted++;
-      } catch (err) {
-        q.error = String(err.message || err).slice(0, 300);
-        q.status = q.attempts >= MAX_EXTRACT_ATTEMPTS || onlyId ? 'failed' : 'pending';
-        done.failed++;
-      }
-      q.updatedAt = store.now();
-      guard(function () { store.save('quotes', q); });
-    });
-    return done;
+    return '<p><b>' + h(r.title) + '</b><br>Closing ' + h(closingForEmail(r.closing)) + ' · Delivery ' + h(r.deliveryLocation) + ' · ' + quoted + ' of ' + rows.length + ' suppliers quoted</p><table style="border-collapse:collapse"><tr>' + head + '</tr>' + body + '</table><p>Only quotations already entered are priced. Figures include estimates: check them against each email before deciding.</p>';
   }
 
   // ------------------------------------------------------------ watching RFQ replies
@@ -992,7 +956,7 @@ var Core = (function () {
   function queueQuote(store, e) {
     var had = store.all('quotes').filter(function (q) { return q.id === e.id; })[0];
     if (had && had.status === 'confirmed') return;
-    var q = { id: e.id, taskId: e.taskId, status: 'pending', data: (had && had.data) || {}, source: '', error: '', attempts: 0, confirmedBy: '', updatedAt: store.now() };
+    var q = { id: e.id, taskId: e.taskId, status: 'pending', data: (had && had.data) || {}, source: '', error: '', confirmedBy: '', updatedAt: store.now() };
     if (had) store.save('quotes', q); else store.insert('quotes', q);
   }
 
@@ -1105,6 +1069,6 @@ var Core = (function () {
 
   return {
     SUPER_ADMINS: SUPER_ADMINS, isSuperId: isSuperId, LEVELS: LEVELS, FIELD_TYPES: FIELD_TYPES, COLORS: COLORS,
-    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, rfqItemsText: rfqItemsText, asanaOnlyFiles: asanaOnlyFiles, rfqEmailBody: rfqEmailBody, followUpBody: followUpBody, classifyReply: classifyReply, runMonitor: runMonitor, extractPending: extractPending, comparison: comparison, comparisonByItem: comparisonByItem, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
+    rank: rank, level: level, can: can, sourcingAccess: sourcingAccess, rfqItemsText: rfqItemsText, asanaOnlyFiles: asanaOnlyFiles, rfqEmailBody: rfqEmailBody, followUpBody: followUpBody, classifyReply: classifyReply, runMonitor: runMonitor, comparison: comparison, comparisonByItem: comparisonByItem, monitorable: monitorable, fail: fail, identify: identify, handle: handle, cleanFields: cleanFields,
   };
 })();
